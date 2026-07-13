@@ -68,6 +68,14 @@
 		</div>
 	</fieldset>
 	<label class="ctl"><input type="checkbox" id="loopOn" checked> loop enabled</label>
+	<fieldset><legend>reverse style (A/B live)</legend>
+		<div class="pill" id="revStyle">
+			<label><input type="radio" name="rev" value="grain" checked><span>Grain (current)</span></label>
+			<label><input type="radio" name="rev" value="grain-clean"><span>Grain clean</span></label>
+			<label><input type="radio" name="rev" value="mirror"><span>Mirror</span></label>
+		</div>
+	</fieldset>
+	<label class="ctl"><input type="checkbox" id="scrubOn"> drag waveform scrubs</label>
 </div>
 
 <div class="row">
@@ -198,7 +206,10 @@ function scheduleObj(extra = {}) {
 		loopEnd: loopOn ? parseFloat($('loopEnd').value) : 0,
 		...extra,
 	};
-	if (mode !== 'legacy') obj.loopMode = mode;
+	if (mode !== 'legacy') {
+		obj.loopMode = mode;
+		obj.reverseStyle = document.querySelector('#revStyle input:checked').value;
+	}
 	return obj;
 }
 async function trigger() {
@@ -264,6 +275,7 @@ function paint() {
 	wctx.fillStyle = 'rgba(255,255,255,0.55)'; wctx.fillRect(sp, 0, 1, h);
 	$('readout').textContent =
 		`inputTime ${inputTime.toFixed(3)}s   rate ${$('rate').value}   mode ${document.querySelector('#mode input:checked').value}` +
+		`   rev ${document.querySelector('#revStyle input:checked').value}` +
 		`   loop [${parseFloat($('loopStart').value).toFixed(3)} .. ${parseFloat($('loopEnd').value).toFixed(3)}]` +
 		(playing ? '   playing' : '   stopped');
 	requestAnimationFrame(paint);
@@ -272,17 +284,22 @@ requestAnimationFrame(paint);
 
 // waveform interaction: click sets start pos, drag near marker moves it
 let dragging = null;
+function scrubTo(t) { // explicit input position: re-applies reachability rules
+	if (stretch && playing) stretch.schedule({input: Math.min(DUR, Math.max(0, t))});
+}
 wave.addEventListener('pointerdown', ev => {
 	const t = ev.offsetX/wave.clientWidth*DUR;
 	const s = parseFloat($('loopStart').value), e = parseFloat($('loopEnd').value);
 	if (Math.abs(t - s) < 0.08) dragging = 'loopStart';
 	else if (Math.abs(t - e) < 0.08) dragging = 'loopEnd';
+	else if ($('scrubOn').checked && playing) { dragging = 'scrub'; scrubTo(t); }
 	else { $('startPos').value = t.toFixed(3); syncOutputs(); }
 	wave.setPointerCapture(ev.pointerId);
 });
 wave.addEventListener('pointermove', ev => {
 	if (!dragging) return;
 	const t = Math.min(DUR, Math.max(0, ev.offsetX/wave.clientWidth*DUR));
+	if (dragging === 'scrub') { scrubTo(t); return; }
 	$(dragging).value = t.toFixed(3);
 	syncOutputs(); liveUpdate();
 });
@@ -307,6 +324,7 @@ $('lfoDepth').addEventListener('input', syncOutputs);
 $('lfoRate').addEventListener('input', syncOutputs);
 $('loopOn').addEventListener('change', liveUpdate);
 document.querySelectorAll('#mode input').forEach(r => r.addEventListener('change', liveUpdate));
+document.querySelectorAll('#revStyle input').forEach(r => r.addEventListener('change', liveUpdate));
 document.querySelectorAll('#material input').forEach(r => r.addEventListener('change', () => loadMaterial()));
 loadMaterial(); // initial waveform, before the engine exists
 $('trigger').addEventListener('click', trigger);
@@ -341,6 +359,14 @@ const TESTS = [
 		setup: {mat: 'tonal', mode: 'forward', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 1.0, lfoDepth: 0.2, lfoRate: 2}},
 	{name: 'High-rate boundary stress', desc: 'Rate 2 on a short ping-pong loop: reflections several times a second. Listen for exactness - no stutter accumulation, no drift of the reflection rhythm.',
 		setup: {mat: 'perc', mode: 'pingpong', rate: 2, loopStart: 1.0, loopEnd: 1.4, start: 1.0}},
+	{name: 'A/B: reverse one-shot styles', desc: 'Percussive at rate -1, no loop. Flip the reverse-style pill while it plays: Grain = hits keep their forward shape (current, smeared); Grain clean = same shape, steadier; Mirror = true tape reverse, hits become swells.',
+		setup: {mat: 'perc', mode: 'forward', rate: -1, loopStart: 0, loopEnd: 0, start: 3.8, loopOn: false, style: 'grain'}},
+	{name: 'A/B: reverse loop tone', desc: 'Tonal reverse loop. Grain: level churns and fizzes (phase randomisation). Grain clean: steadier, listen for any phasey swirl instead. Mirror: cleanest, forward-quality synthesis.',
+		setup: {mat: 'tonal', mode: 'reverse', rate: 1, loopStart: 1.0, loopEnd: 2.5, start: 1.0, style: 'grain'}},
+	{name: 'A/B: scrub styles', desc: 'Scrubbing enabled - drag across the waveform, including quick back-and-forth jiggles. Compare styles for smear, gaps and how direction flips feel. This is the case most like Aura scrub gestures.',
+		setup: {mat: 'perc', mode: 'forward', rate: 1, loopStart: 0, loopEnd: 0, start: 1.0, loopOn: false, style: 'grain', scrub: true}},
+	{name: 'A/B: mirrored ping-pong reflections', desc: 'Ping-pong across a drum bar. Grain: each reflection re-enters with forward-shaped hits. Mirror: the backward leg is true reverse and the reflection point is a continuous palindrome - listen for seamlessness at the turn.',
+		setup: {mat: 'perc', mode: 'pingpong', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 1.0, style: 'grain'}},
 ];
 const testsDiv = $('tests');
 for (const t of TESTS) {
@@ -353,8 +379,10 @@ for (const t of TESTS) {
 		const s = t.setup;
 		document.querySelector(`#material input[value=${s.mat}]`).checked = true;
 		document.querySelector(`#mode input[value=${s.mode}]`).checked = true;
+		document.querySelector(`#revStyle input[value="${s.style || 'grain'}"]`).checked = true;
 		$('rate').value = s.rate; $('loopStart').value = s.loopStart; $('loopEnd').value = s.loopEnd;
-		$('startPos').value = s.start; $('loopOn').checked = true;
+		$('startPos').value = s.start; $('loopOn').checked = s.loopOn !== false;
+		$('scrubOn').checked = !!s.scrub;
 		$('lfoDepth').value = s.lfoDepth || 0; $('lfoRate').value = s.lfoRate || 0.5;
 		syncOutputs();
 		await ensureEngine();
