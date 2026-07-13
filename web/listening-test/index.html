@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signalsmith Stretch — loop-mode listening tests</title>
+<style>
+	:root { color-scheme: dark; }
+	* { box-sizing: border-box; }
+	body {
+		font: 14px/1.45 system-ui, sans-serif;
+		background: #14161a; color: #d8dce2;
+		margin: 0; padding: 18px; max-width: 1100px; margin-inline: auto;
+	}
+	h1 { font-size: 18px; margin: 0 0 4px; }
+	h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #8b93a0; margin: 18px 0 8px; }
+	.muted { color: #8b93a0; font-size: 12.5px; }
+	#wave { width: 100%; height: 130px; background: #0d0f12; border: 1px solid #262a31; border-radius: 6px; display: block; cursor: crosshair; }
+	.row { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; margin: 8px 0; }
+	label.ctl { display: flex; align-items: center; gap: 8px; }
+	label.ctl span.name { width: 86px; color: #aab2bd; }
+	label.ctl output { width: 62px; text-align: right; font-variant-numeric: tabular-nums; }
+	input[type=range] { width: 210px; accent-color: #5aa2ff; }
+	button {
+		background: #232833; color: #e6e9ee; border: 1px solid #363d4a;
+		border-radius: 6px; padding: 7px 14px; cursor: pointer; font: inherit;
+	}
+	button:hover { background: #2c3341; }
+	button.primary { background: #2456a8; border-color: #2f6ac9; }
+	button.primary:hover { background: #2a63c0; }
+	fieldset { border: 1px solid #262a31; border-radius: 6px; margin: 0; }
+	legend { color: #8b93a0; font-size: 12px; padding: 0 6px; }
+	.pill { display: inline-flex; gap: 0; border: 1px solid #363d4a; border-radius: 6px; overflow: hidden; }
+	.pill label { padding: 6px 12px; cursor: pointer; background: #1b1f26; }
+	.pill input { display: none; }
+	.pill input:checked + span { color: #fff; }
+	.pill label:has(input:checked) { background: #2456a8; }
+	#readout { font-variant-numeric: tabular-nums; white-space: pre; font-family: ui-monospace, monospace; font-size: 12.5px; color: #9fd0a0; }
+	.tests { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 10px; }
+	.test { border: 1px solid #262a31; border-radius: 6px; padding: 10px 12px; background: #181b20; }
+	.test b { color: #e6e9ee; }
+	.test p { margin: 6px 0; font-size: 12.5px; color: #aab2bd; }
+	.test button { font-size: 12px; padding: 4px 10px; }
+</style>
+</head>
+<body>
+<h1>Signalsmith Stretch — loop-mode listening tests</h1>
+<p class="muted">Fork build with native <code>loopMode</code> (forward / reverse / ping-pong). Click the waveform to set the start position; drag the loop edges to move markers live.</p>
+
+<canvas id="wave" width="1060" height="130"></canvas>
+
+<div class="row">
+	<button id="trigger" class="primary">Trigger (T)</button>
+	<button id="stopBtn">Stop</button>
+	<fieldset><legend>material</legend>
+		<div class="pill" id="material">
+			<label><input type="radio" name="mat" value="tonal" checked><span>Tonal</span></label>
+			<label><input type="radio" name="mat" value="perc"><span>Percussive</span></label>
+			<label><input type="radio" name="mat" value="split"><span>Split-tone 220/880</span></label>
+		</div>
+	</fieldset>
+	<fieldset><legend>loop mode</legend>
+		<div class="pill" id="mode">
+			<label><input type="radio" name="mode" value="legacy"><span>Legacy</span></label>
+			<label><input type="radio" name="mode" value="forward" checked><span>Forward</span></label>
+			<label><input type="radio" name="mode" value="reverse"><span>Reverse</span></label>
+			<label><input type="radio" name="mode" value="pingpong"><span>Ping-pong</span></label>
+		</div>
+	</fieldset>
+	<label class="ctl"><input type="checkbox" id="loopOn" checked> loop enabled</label>
+</div>
+
+<div class="row">
+	<label class="ctl"><span class="name">Rate</span><input type="range" id="rate" min="-2" max="2" step="0.01" value="1"><output id="rateOut">1.00</output></label>
+	<button id="flip">Flip polarity (F)</button>
+	<button id="zero">Rate 0 hold (0)</button>
+	<label class="ctl"><span class="name">Pitch (st)</span><input type="range" id="pitch" min="-12" max="12" step="1" value="0"><output id="pitchOut">0</output></label>
+</div>
+<div class="row">
+	<label class="ctl"><span class="name">Loop start</span><input type="range" id="loopStart" min="0" max="4" step="0.001" value="1.0"><output id="loopStartOut">1.000</output></label>
+	<label class="ctl"><span class="name">Loop end</span><input type="range" id="loopEnd" min="0" max="4" step="0.001" value="2.0"><output id="loopEndOut">2.000</output></label>
+	<label class="ctl"><span class="name">Start pos</span><input type="range" id="startPos" min="0" max="4" step="0.001" value="0.5"><output id="startPosOut">0.500</output></label>
+</div>
+<div class="row">
+	<fieldset><legend>live marker modulation</legend>
+		<div class="row" style="margin:4px 8px">
+			<label class="ctl"><span class="name">Depth (s)</span><input type="range" id="lfoDepth" min="0" max="0.5" step="0.005" value="0"><output id="lfoDepthOut">0.000</output></label>
+			<label class="ctl"><span class="name">Speed (Hz)</span><input type="range" id="lfoRate" min="0.05" max="8" step="0.05" value="0.5"><output id="lfoRateOut">0.50</output></label>
+			<div class="pill" id="lfoTarget">
+				<label><input type="radio" name="lfoT" value="both" checked><span>Window</span></label>
+				<label><input type="radio" name="lfoT" value="end"><span>End only</span></label>
+				<label><input type="radio" name="lfoT" value="start"><span>Start only</span></label>
+			</div>
+		</div>
+	</fieldset>
+</div>
+
+<h2>State</h2>
+<div id="readout">—</div>
+
+<h2>Listening tests</h2>
+<div class="tests" id="tests"></div>
+
+<script type="module">
+import SignalsmithStretch from '../release/SignalsmithStretch.mjs';
+
+const SR = 48000, DUR = 4;
+const $ = id => document.getElementById(id);
+
+// ---------- Test material (synthesised, self-contained) ----------
+function tonalBuffer() { // sustained detuned pad + slow arpeggio: exposes phasing & seam pitch consistency
+	const n = SR*DUR, b = new Float32Array(n);
+	const chord = [110, 165, 220, 275];
+	for (const f of chord) {
+		let p1 = 0, p2 = 0;
+		for (let i = 0; i < n; i++) {
+			p1 += 2*Math.PI*f/SR; p2 += 2*Math.PI*(f*1.003)/SR;
+			b[i] += (Math.sin(p1) + Math.sin(p2))*0.055;
+		}
+	}
+	const notes = [440, 550, 660, 880];
+	for (let k = 0; k < 16; k++) {
+		const f = notes[k%4], start = k*0.25*SR;
+		let p = 0;
+		for (let i = 0; i < SR*0.22 && start + i < n; i++) {
+			p += 2*Math.PI*f/SR;
+			b[start + i | 0] += Math.sin(p)*0.22*Math.exp(-i/(SR*0.06));
+		}
+	}
+	return b;
+}
+function percBuffer() { // 120bpm kit: exposes transient duplication, gaps and clicks at seams
+	const n = SR*DUR, b = new Float32Array(n);
+	const step = SR*0.125; // 16ths at 120bpm
+	let seed = 22222; const rnd = () => (seed = seed*1664525 + 1013904223 | 0, (seed >>> 9)/(1 << 23) - 1);
+	for (let k = 0; k < 32; k++) {
+		const t0 = k*step | 0;
+		if (k%4 === 0) { // kick
+			let p = 0;
+			for (let i = 0; i < SR*0.12; i++) {
+				p += 2*Math.PI*(120*Math.exp(-i/(SR*0.03)) + 40)/SR;
+				b[t0 + i] += Math.sin(p)*0.8*Math.exp(-i/(SR*0.05));
+			}
+		}
+		if (k%8 === 4) { // snare
+			for (let i = 0; i < SR*0.09; i++) b[t0 + i] += rnd()*0.5*Math.exp(-i/(SR*0.025));
+		}
+		let hp = 0; // hat (high-passed noise tick)
+		for (let i = 0; i < SR*0.03; i++) {
+			const w = rnd(); const out = w - hp; hp = w;
+			b[t0 + i] += out*0.28*Math.exp(-i/(SR*0.008));
+		}
+	}
+	return b;
+}
+function splitBuffer() { // 220Hz first half, 880Hz second half: makes direction & legs audible
+	const n = SR*DUR, b = new Float32Array(n);
+	let p = 0;
+	for (let i = 0; i < n; i++) {
+		p += 2*Math.PI*(i < n/2 ? 220 : 880)/SR;
+		b[i] = Math.sin(p)*0.4;
+	}
+	return b;
+}
+const MATERIALS = {tonal: tonalBuffer, perc: percBuffer, split: splitBuffer};
+
+// ---------- Engine ----------
+let ctx, stretch, currentBuffer;
+let inputTime = 0, playing = false;
+
+async function ensureEngine() {
+	if (stretch) return;
+	ctx = new AudioContext({sampleRate: SR});
+	stretch = await SignalsmithStretch(ctx);
+	stretch.connect(ctx.destination);
+	stretch.setUpdateInterval(1/30, t => { inputTime = t; });
+	await loadMaterial();
+}
+async function loadMaterial() {
+	const kind = document.querySelector('#material input:checked').value;
+	currentBuffer = MATERIALS[kind]();
+	drawWave();
+	if (!stretch) return;
+	await stretch.dropBuffers();
+	await stretch.addBuffers([currentBuffer, currentBuffer]);
+}
+
+function scheduleObj(extra = {}) {
+	const loopOn = $('loopOn').checked;
+	const mode = document.querySelector('#mode input:checked').value;
+	const obj = {
+		rate: parseFloat($('rate').value),
+		semitones: parseFloat($('pitch').value),
+		loopStart: loopOn ? parseFloat($('loopStart').value) : 0,
+		loopEnd: loopOn ? parseFloat($('loopEnd').value) : 0,
+		...extra,
+	};
+	if (mode !== 'legacy') obj.loopMode = mode;
+	return obj;
+}
+async function trigger() {
+	await ensureEngine();
+	if (ctx.state !== 'running') await ctx.resume();
+	stretch.schedule(scheduleObj({active: true, input: parseFloat($('startPos').value)}));
+	playing = true;
+}
+function liveUpdate() { // continuation change: no input -> no retrigger
+	if (!stretch || !playing) return;
+	stretch.schedule(scheduleObj());
+}
+
+// ---------- Marker modulation (main-thread LFO; boundary decisions stay in the worklet) ----------
+let lfoPhase = 0, lastLfo = performance.now();
+setInterval(() => {
+	const depth = parseFloat($('lfoDepth').value);
+	const now = performance.now();
+	const dt = (now - lastLfo)/1000; lastLfo = now;
+	if (!depth || !stretch || !playing) return;
+	lfoPhase += 2*Math.PI*parseFloat($('lfoRate').value)*dt;
+	const wob = Math.sin(lfoPhase)*depth;
+	const target = document.querySelector('#lfoTarget input:checked').value;
+	const s = parseFloat($('loopStart').value), e = parseFloat($('loopEnd').value);
+	const obj = scheduleObj();
+	if (target !== 'end') obj.loopStart = Math.max(0, s + wob);
+	if (target !== 'start') obj.loopEnd = Math.min(DUR, e + wob);
+	if (obj.loopEnd > obj.loopStart) stretch.schedule(obj);
+}, 40);
+
+// ---------- Waveform / playhead ----------
+const wave = $('wave'), wctx = wave.getContext('2d');
+let peaks = null;
+function drawWave() {
+	if (!currentBuffer) return;
+	const w = wave.width, h = wave.height;
+	peaks = new Float32Array(w);
+	const per = currentBuffer.length/w;
+	for (let x = 0; x < w; x++) {
+		let m = 0;
+		for (let i = x*per | 0; i < (x + 1)*per && i < currentBuffer.length; i += 8) m = Math.max(m, Math.abs(currentBuffer[i]));
+		peaks[x] = m;
+	}
+}
+function paint() {
+	const w = wave.width, h = wave.height;
+	wctx.fillStyle = '#0d0f12'; wctx.fillRect(0, 0, w, h);
+	const s = parseFloat($('loopStart').value)/DUR*w, e = parseFloat($('loopEnd').value)/DUR*w;
+	if ($('loopOn').checked && e > s) {
+		wctx.fillStyle = 'rgba(90,162,255,0.13)'; wctx.fillRect(s, 0, e - s, h);
+		wctx.fillStyle = '#5aa2ff'; wctx.fillRect(s, 0, 2, h); wctx.fillRect(e - 1, 0, 2, h);
+	}
+	if (peaks) {
+		wctx.fillStyle = '#69d18c';
+		for (let x = 0; x < w; x++) {
+			const y = peaks[x]*h*0.48;
+			wctx.fillRect(x, h/2 - y, 1, y*2 || 1);
+		}
+	}
+	const px = inputTime/DUR*w;
+	wctx.fillStyle = '#ffce54'; wctx.fillRect(px - 1, 0, 2, h);
+	const sp = parseFloat($('startPos').value)/DUR*w;
+	wctx.fillStyle = 'rgba(255,255,255,0.55)'; wctx.fillRect(sp, 0, 1, h);
+	$('readout').textContent =
+		`inputTime ${inputTime.toFixed(3)}s   rate ${$('rate').value}   mode ${document.querySelector('#mode input:checked').value}` +
+		`   loop [${parseFloat($('loopStart').value).toFixed(3)} .. ${parseFloat($('loopEnd').value).toFixed(3)}]` +
+		(playing ? '   playing' : '   stopped');
+	requestAnimationFrame(paint);
+}
+requestAnimationFrame(paint);
+
+// waveform interaction: click sets start pos, drag near marker moves it
+let dragging = null;
+wave.addEventListener('pointerdown', ev => {
+	const t = ev.offsetX/wave.clientWidth*DUR;
+	const s = parseFloat($('loopStart').value), e = parseFloat($('loopEnd').value);
+	if (Math.abs(t - s) < 0.08) dragging = 'loopStart';
+	else if (Math.abs(t - e) < 0.08) dragging = 'loopEnd';
+	else { $('startPos').value = t.toFixed(3); syncOutputs(); }
+	wave.setPointerCapture(ev.pointerId);
+});
+wave.addEventListener('pointermove', ev => {
+	if (!dragging) return;
+	const t = Math.min(DUR, Math.max(0, ev.offsetX/wave.clientWidth*DUR));
+	$(dragging).value = t.toFixed(3);
+	syncOutputs(); liveUpdate();
+});
+wave.addEventListener('pointerup', () => dragging = null);
+
+// ---------- Controls ----------
+function syncOutputs() {
+	$('rateOut').value = (+$('rate').value).toFixed(2);
+	$('pitchOut').value = $('pitch').value;
+	$('loopStartOut').value = (+$('loopStart').value).toFixed(3);
+	$('loopEndOut').value = (+$('loopEnd').value).toFixed(3);
+	$('startPosOut').value = (+$('startPos').value).toFixed(3);
+	$('lfoDepthOut').value = (+$('lfoDepth').value).toFixed(3);
+	$('lfoRateOut').value = (+$('lfoRate').value).toFixed(2);
+}
+syncOutputs();
+for (const id of ['rate', 'pitch', 'loopStart', 'loopEnd']) {
+	$(id).addEventListener('input', () => { syncOutputs(); liveUpdate(); });
+}
+$('startPos').addEventListener('input', syncOutputs);
+$('lfoDepth').addEventListener('input', syncOutputs);
+$('lfoRate').addEventListener('input', syncOutputs);
+$('loopOn').addEventListener('change', liveUpdate);
+document.querySelectorAll('#mode input').forEach(r => r.addEventListener('change', liveUpdate));
+document.querySelectorAll('#material input').forEach(r => r.addEventListener('change', () => loadMaterial()));
+loadMaterial(); // initial waveform, before the engine exists
+$('trigger').addEventListener('click', trigger);
+$('stopBtn').addEventListener('click', () => { if (stretch) { stretch.stop(); playing = false; } });
+$('flip').addEventListener('click', () => { $('rate').value = -parseFloat($('rate').value); syncOutputs(); liveUpdate(); });
+$('zero').addEventListener('click', () => { $('rate').value = 0; syncOutputs(); liveUpdate(); });
+document.addEventListener('keydown', ev => {
+	if (ev.key === 't' || ev.key === 'T') trigger();
+	if (ev.key === 'f' || ev.key === 'F') $('flip').click();
+	if (ev.key === '0') $('zero').click();
+});
+
+// ---------- Scripted listening tests ----------
+const TESTS = [
+	{name: 'Seam consistency (forward)', desc: 'Percussive material, forward loop over one bar. Listen: every wrap should sound identical - no early/late transients, no doubled hits at the seam.',
+		setup: {mat: 'perc', mode: 'forward', rate: 1, loopStart: 1.0, loopEnd: 3.0, start: 0.5}},
+	{name: 'Transient duplication (ping-pong)', desc: 'Percussive, ping-pong. At each reflection a hit near the boundary legitimately plays twice (forward then reversed) - but it should never smear, gap or click.',
+		setup: {mat: 'perc', mode: 'pingpong', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 1.0}},
+	{name: 'Gaps & clicks (short loop)', desc: 'Tonal, very short reverse loop. Listen for dropouts or clicks at the high seam rate. Some level movement is normal for reversed phase-vocoder audio.',
+		setup: {mat: 'tonal', mode: 'reverse', rate: 1, loopStart: 1.5, loopEnd: 1.75, start: 1.5}},
+	{name: 'Phasing (pad seams)', desc: 'Sustained detuned pad, forward loop. Listen across several wraps: the seam should not introduce comb-filtering/phasey swirls beyond the pad\'s own beating.',
+		setup: {mat: 'tonal', mode: 'forward', rate: 0.5, loopStart: 0.5, loopEnd: 2.5, start: 0.5}},
+	{name: 'Direction changes (split tone)', desc: '220Hz left half, 880Hz right half. Ping-pong across the split: you should hear A-B-B-A-A-B... Press F mid-leg: motion reverses immediately with no retrigger.',
+		setup: {mat: 'split', mode: 'pingpong', rate: 1, loopStart: 1.5, loopEnd: 2.5, start: 1.5}},
+	{name: 'Reverse topology (split tone)', desc: 'Reverse mode from before the loop: expect A-B (approach), then B-A repeating with a wrap from A back to B. Flip polarity to hear the cycle invert without a reset.',
+		setup: {mat: 'split', mode: 'reverse', rate: 1, loopStart: 1.5, loopEnd: 2.5, start: 1.0}},
+	{name: 'Rate-zero hold & resume', desc: 'Trigger, then press 0: the spectrum freezes audibly (no silence). Move Rate negative: playback resumes backward from the held spot.',
+		setup: {mat: 'tonal', mode: 'pingpong', rate: 1, loopStart: 1.0, loopEnd: 3.0, start: 1.0}},
+	{name: 'Long-term drift', desc: 'Percussive forward loop at rate 1 over exactly 2s. Let it run minutes: the playhead readout and the groove must stay locked - no cumulative creep of the seam against the pattern.',
+		setup: {mat: 'perc', mode: 'forward', rate: 1, loopStart: 0.0, loopEnd: 2.0, start: 0.0}},
+	{name: 'Marker modulation stress', desc: 'Enable window modulation (depth 0.2, speed 2Hz) while looping: the voice must stay trapped, follow the moving window, and never spit out clicks or escape.',
+		setup: {mat: 'tonal', mode: 'forward', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 1.0, lfoDepth: 0.2, lfoRate: 2}},
+	{name: 'High-rate boundary stress', desc: 'Rate 2 on a short ping-pong loop: reflections several times a second. Listen for exactness - no stutter accumulation, no drift of the reflection rhythm.',
+		setup: {mat: 'perc', mode: 'pingpong', rate: 2, loopStart: 1.0, loopEnd: 1.4, start: 1.0}},
+];
+const testsDiv = $('tests');
+for (const t of TESTS) {
+	const el = document.createElement('div');
+	el.className = 'test';
+	el.innerHTML = `<b>${t.name}</b><p>${t.desc}</p>`;
+	const btn = document.createElement('button');
+	btn.textContent = 'Set up & play';
+	btn.addEventListener('click', async () => {
+		const s = t.setup;
+		document.querySelector(`#material input[value=${s.mat}]`).checked = true;
+		document.querySelector(`#mode input[value=${s.mode}]`).checked = true;
+		$('rate').value = s.rate; $('loopStart').value = s.loopStart; $('loopEnd').value = s.loopEnd;
+		$('startPos').value = s.start; $('loopOn').checked = true;
+		$('lfoDepth').value = s.lfoDepth || 0; $('lfoRate').value = s.lfoRate || 0.5;
+		syncOutputs();
+		await ensureEngine();
+		await loadMaterial();
+		trigger();
+	});
+	el.appendChild(btn);
+	testsDiv.appendChild(el);
+}
+</script>
+</body>
+</html>
