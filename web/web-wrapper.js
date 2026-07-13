@@ -141,8 +141,10 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					return obj;
 				},
 				dropBuffers: toSeconds => {
+					// Transfer lists must not contain duplicates: channels may share
+					// one ArrayBuffer (e.g. the same array added for every channel)
 					if (typeof toSeconds !== 'number') {
-						let buffers = this.audioBuffers.flat(1).map(b => b.buffer);
+						let buffers = [...new Set(this.audioBuffers.flat(1).map(b => b.buffer))];
 						this.audioBuffers = [];
 						this.audioBuffersStart = this.audioBuffersEnd = 0;
 						return {
@@ -150,7 +152,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 							transfer: buffers
 						};
 					}
-					let transfer = [];
+					let transfer = new Set();
 					while (this.audioBuffers.length) {
 						let first = this.audioBuffers[0];
 						let length = first[0].length;
@@ -158,9 +160,10 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 						let endSeconds = endSamples/sampleRate;
 						if (endSeconds > toSeconds) break;
 
-						this.audioBuffers.shift().forEach(b => transfer.push(b.buffer));
+						this.audioBuffers.shift().forEach(b => transfer.add(b.buffer));
 						this.audioBuffersStart += length;
 					}
+					transfer = [...transfer];
 					return {
 						value: {
 							start: this.audioBuffersStart/sampleRate,

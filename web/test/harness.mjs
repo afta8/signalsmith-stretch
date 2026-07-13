@@ -24,7 +24,13 @@ export async function createProcessor({
 		currentFrame: 0,
 		AudioWorkletProcessor: class AudioWorkletProcessor {
 			constructor() {
-				this.port = {onmessage: null, postMessage: () => {}};
+				// enforce the real MessagePort rule: a transfer list must not
+				// contain duplicate ArrayBuffers (browsers throw DataCloneError)
+				this.port = {onmessage: null, postMessage: (data, transfer) => {
+					if (transfer && new Set(transfer).size !== transfer.length) {
+						throw new Error('DataCloneError: duplicate ArrayBuffer in transfer list');
+					}
+				}};
 			}
 		},
 		registerProcessor: (name, cls) => { registered = {name, cls}; },
@@ -47,7 +53,10 @@ export async function createProcessor({
 	const posted = []; // every message the processor posts
 	const timePosts = []; // {frame, value} for 'time' messages
 	let renderedFrames = 0;
-	proc.port.postMessage = (data) => {
+	proc.port.postMessage = (data, transfer) => {
+		if (transfer && new Set(transfer).size !== transfer.length) {
+			throw new Error('DataCloneError: duplicate ArrayBuffer in transfer list');
+		}
 		posted.push(data);
 		if (data[0] === 'time') timePosts.push({frame: renderedFrames, seconds: renderedFrames/sampleRate, value: data[1]});
 	};

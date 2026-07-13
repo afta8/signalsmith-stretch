@@ -185,6 +185,23 @@ test('rate zero holds audible spectrum inside the loop, then resumes', async () 
 	assert.ok(rms(tail) > 0.05, 'resumed playback after the hold');
 });
 
+test('dropBuffers survives channels sharing one ArrayBuffer (duplicate transfer regression)', async () => {
+	// same Float32Array for both channels: structured clone preserves identity,
+	// so the worklet's channels share one ArrayBuffer; dropBuffers must not put
+	// it in the transfer list twice (browsers throw DataCloneError)
+	const h = await createProcessor({sampleRate: SR});
+	const mono = sineBuffer({sampleRate: SR, seconds: 0.5, channels: 1})[0];
+	h.call('addBuffers', [mono, mono]);
+	h.call('dropBuffers'); // full drop path
+	h.call('addBuffers', [mono, mono]);
+	h.call('dropBuffers', 0.5); // partial drop path
+	// still renders cleanly afterwards
+	h.call('addBuffers', sineBuffer({sampleRate: SR, seconds: 1}));
+	h.call('schedule', {active: true, input: 0, rate: 1, loopStart: 0.2, loopEnd: 0.6, loopMode: 'forward', output: 0});
+	const out = h.render(300)[0];
+	assert.ok(!hasNaN(out) && rms(out.subarray(out.length >> 1)) > 0.05, 'renders after shared-buffer drops');
+});
+
 test('pitch shift and loop modes combine (semitones stay applied across seams)', async () => {
 	const buffer = sineBuffer({sampleRate: SR, seconds: 2, freq: 220});
 	const {out} = await renderSchedule({
