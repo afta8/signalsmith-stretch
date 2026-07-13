@@ -43,6 +43,10 @@ echo "$MODULE_NAME: $INPUT_CPP -> $OUTPUT_JS"
 
 #	-sSTRICT -sASSERTIONS --closure=0 \
 
+# Stop on compiler failure, so the post-processing step below can't rewrite
+# (and re-timestamp) a stale output file and fool Make into thinking it built
+set -e
+
 em++ \
 	$INPUT_CPP -o "${OUTPUT_JS}" \
 	-sEXPORT_NAME=$MODULE_NAME -DEXPORT_NAME=$MODULE_NAME \
