@@ -1,6 +1,8 @@
 # Signalsmith Stretch Web
 
-This is an official release of the Signalsmith Stretch library for Web Audio, using WASM/AudioWorklet.  It includes both plain `.js` (UMD), and ES6 `.mjs` versions.
+This is a fork of the official Signalsmith Stretch release for Web Audio (WASM/AudioWorklet), extended with native loop topologies (`loopMode`: forward/reverse/ping-pong, signed-rate aware, with all loop-boundary decisions made inside the audio thread).  It includes both plain `.js` (UMD), and ES6 `.mjs` versions.
+
+Upstream: https://github.com/Signalsmith-Audio/signalsmith-stretch (MIT).  Consumers that don't set `loopMode` get the original upstream behaviour unchanged.
 
 ## How to use it
 
@@ -25,8 +27,25 @@ This adds a scheduled change, removing any scheduled changes occuring after this
 * `formantSemitones` (number) / `formantCompensation` (bool): formant shift/compensation
 * `formantBaseHz` (number): rough fundamental used for formant analysis (e.g. 100 for low voice, 400 for high voice), or `0` to attempt pitch-tracking
 * `loopStart` (seconds) / `loopEnd` (seconds): sets a section of the input buffer to auto-loop.  Disabled if both are set to the same value.
+* `loopMode` (`'forward'` | `'reverse'` | `'pingpong'`, optional): loop topology.  When unset, the original (positive-rate forward) looping behaviour is used unchanged.
 
-If the node is processing live input (not a buffer) then `input`/`rate`/`loopStart`/`loopEnd` are ignored.
+If the node is processing live input (not a buffer) then `input`/`rate`/`loopStart`/`loopEnd`/`loopMode` are ignored.
+
+### Loop modes
+
+Setting `loopMode` enables a loop engine where every boundary decision happens inside the AudioWorklet, so loop timing never depends on main-thread messages.  `rate` is signed, and the actual travel direction is `rate sign x current loop leg`:
+
+* **`forward`**: positive rates wrap loop end to loop start; negative rates travel backward and wrap loop start to loop end.
+* **`reverse`**: playback first travels to the far boundary (loop end at positive rates, loop start at negative), turns there once, then cycles against the rate sign, wrapping at the boundaries.
+* **`pingpong`**: playback reflects at each boundary, preserving overshoot.  Positive rates take their first leg toward loop end, negative rates toward loop start.
+
+Behaviour rules shared by all modes:
+
+* The requested `input` position always has priority: playback becomes trapped in the loop only after reaching it from a reachable direction.  A positive-rate start beyond the loop end (or a negative-rate start before the loop start) plays as a one-shot.
+* Live `rate` polarity changes reverse the current travel without retriggering or resetting the loop leg.  `rate: 0` keeps the spectral hold, and the last non-zero direction stays defined.
+* Moving `loopStart`/`loopEnd` while playback is inside the loop keeps it trapped and phase-maps it into the new window; moving markers before entry doesn't override start reachability.
+* Setting invalid or zero-width bounds (`loopEnd <= loopStart`) safely disables looping and releases the voice to ordinary one-shot traversal.
+* High rates that cross one or more loop lengths within a render quantum are handled exactly (analytic wrap/reflect), independent of render-quantum size and free of cumulative drift.
 
 ### `stretch.start(?when)` / `stretch.stop(?when)`
 

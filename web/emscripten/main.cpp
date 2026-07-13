@@ -6,7 +6,11 @@ int main() {}
 
 using Sample = float;
 using Stretch = signalsmith::stretch::SignalsmithStretch<Sample>;
-Stretch stretch;
+// Fixed seed: upstream's default constructor seeds the phase-randomisation
+// engine from std::random_device, which makes renders non-repeatable across
+// instances whenever phase randomisation is active (e.g. negative rates).
+// A fixed seed keeps identical renders bit-identical.
+Stretch stretch(0x5157e7c4);
 
 // Allocates memory for buffers, and returns it
 std::vector<Sample> buffers;
