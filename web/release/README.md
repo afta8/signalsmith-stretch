@@ -67,6 +67,7 @@ Rules:
 * The effective crossfade is clamped to half the loop width: `min(loopCrossfade, (loopEnd - loopStart) / 2)`.
 * It is inherited by continuation segments like ordinary parameters, and can be changed live — including across a seam — without retriggering, resetting pitch, changing the tempo, or releasing the loop trap.
 * All seam reads stay strictly **inside** `[loopStart, loopEnd)`; no material from outside the loop is used.
+* The taper is two-sided: it blends into same-direction material while approaching the wrap, then recovers to the authoritative phase after the wrap.  It never reflects or reverses source material.
 
 `reverseStyle` (`'grain'`/`'mirror'`) is fully compatible: the seam timing, duration and reported playhead are identical across styles; only the established backward-rendering character differs.
 

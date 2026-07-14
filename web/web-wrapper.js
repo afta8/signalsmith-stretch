@@ -322,14 +322,11 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 		// Duration-preserving in-loop seam taper for crossfaded wrapping loops.
 		// The analysis window is synthesised along the travel path over the FULL
 		// loop length L (phase clock unchanged - crossfade never alters duration
-		// or the reported playhead). Only the rendered values within F of the
-		// wrap seam are modified: there, the primary read source(S + cp) is
-		// equal-power-blended toward its seam reflection source(S + (L - cp)),
-		// with weight = (distance to seam)/F. This makes the window C0-continuous
-		// across the wrap (removing the raw source(E)->source(S) step) using only
-		// in-loop material, at the cost of a short reflected-material region in
-		// the seam whose residual is documented and measured (never a period
-		// change, never an out-of-loop read). One voice, one process() call.
+		// or the reported playhead). Within F on BOTH sides of the wrap, the
+		// primary read is equal-power-blended with a same-direction continuation:
+		// the approach crosses into the far-side material, then the recovery side
+		// returns to the authoritative phase. This keeps every read in-loop and
+		// never reflects/reverses source material. One voice, one process() call.
 		fillInputWindowSeamTaper(memory, outputList, seg, dir, style, Lsec, Fsec) {
 			let n = this.bufferLength;
 			let S = seg.loopStart*sampleRate;
@@ -343,7 +340,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			// travel are travel-ordered
 			let backwardGrain = (dir < 0 && style !== 'mirror');
 			let halfPi = Math.PI*0.5;
-			let clampLoop = i => (i < S ? Math.round(S) : (i > loEnd ? loEnd : i));
+			let loStart = Math.round(S);
 			for (let c = 0; c < this.channels; ++c) {
 				let view = new Float32Array(memory, this.buffersIn[c], n);
 				this._readSeg = 0;
@@ -351,24 +348,45 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				for (let j = 0; j < n; ++j) {
 					let delta = backwardGrain ? (anchor - j) : (j - anchor);
 					let cp = posMod(relS + dir*delta, L); // full-L phase position
-					let primary = this.sourceSample(c, clampLoop(Math.round(S + cp)));
-					// Taper only the side the voice is APPROACHING the seam from:
-					// forward travel taps the tail [L-F, L); backward the head
-					// [0, F). ds = distance to the seam. The primary is blended
-					// toward the seam reflection source(S + (L - cp)), which at the
-					// seam converges to the material on the far side (source(S) for
-					// forward, source(E) for backward) - so the window meets the
-					// post-wrap body continuously, using only in-loop reads.
-					let ds = -1;
-					if (dir > 0 && cp >= L - F) ds = L - cp;
-					else if (dir < 0 && cp < F) ds = cp;
-					if (ds >= 0) {
-						let w = Math.sin((ds/F)*halfPi); // primary gain (1 at edge, 0 at seam)
-						let reflect = this.sourceSample(c, clampLoop(Math.round(S + (L - cp))));
-						view[j] = w*primary + Math.cos((ds/F)*halfPi)*reflect;
-					} else {
-						view[j] = primary;
+					let primaryIndex = Math.round(S + cp);
+					if (primaryIndex < loStart) primaryIndex = loStart;
+					else if (primaryIndex > loEnd) primaryIndex = loEnd;
+					let primary = this.sourceSample(c, primaryIndex);
+					let secondaryPhase = -1;
+					let primaryGain = 1;
+					let secondaryGain = 0;
+					if (dir > 0 && cp >= L - F) {
+						// Forward approach: tail -> head, both read forward.
+						let x = (cp - (L - F))/F;
+						secondaryPhase = cp - (L - F);
+						primaryGain = Math.cos(x*halfPi);
+						secondaryGain = Math.sin(x*halfPi);
+					} else if (dir > 0 && cp < F) {
+						// Forward recovery: continued head -> authoritative head.
+						let x = cp/F;
+						secondaryPhase = F + cp;
+						primaryGain = Math.sin(x*halfPi);
+						secondaryGain = Math.cos(x*halfPi);
+					} else if (dir < 0 && cp < F) {
+						// Backward approach: head -> tail, both read backward.
+						let x = (F - cp)/F;
+						secondaryPhase = L - F + cp;
+						primaryGain = Math.cos(x*halfPi);
+						secondaryGain = Math.sin(x*halfPi);
+					} else if (dir < 0 && cp >= L - F) {
+						// Backward recovery: continued tail -> authoritative tail.
+						let x = (L - cp)/F;
+						secondaryPhase = cp - F;
+						primaryGain = Math.sin(x*halfPi);
+						secondaryGain = Math.cos(x*halfPi);
 					}
+					if (secondaryPhase >= 0) {
+						let secondaryIndex = Math.round(S + secondaryPhase);
+						if (secondaryIndex < loStart) secondaryIndex = loStart;
+						else if (secondaryIndex > loEnd) secondaryIndex = loEnd;
+						let secondary = this.sourceSample(c, secondaryIndex);
+						view[j] = primaryGain*primary + secondaryGain*secondary;
+					} else view[j] = primary;
 				}
 			}
 		}
@@ -502,7 +520,13 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 		// distance; the mode formulas map it to actual motion.
 		advanceVoice(seg, outputTime) {
 			let v = this.voice;
-			let travel = Math.max(0, outputTime - v.anchorOutput)*seg.rate;
+			let elapsed = outputTime - v.anchorOutput;
+			// A future-scheduled onset can become the selected segment during seek
+			// pre-roll. Until its activation time, keep both phase and anchor at the
+			// future frame; moving the anchor backward would make later pre-roll
+			// quanta advance the voice early and create a stable handoff offset.
+			if (!(elapsed > 0)) return;
+			let travel = elapsed*seg.rate;
 			v.anchorOutput = outputTime;
 			let L = this.loopLength(seg);
 			if (!L) {

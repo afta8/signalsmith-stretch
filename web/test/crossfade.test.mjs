@@ -122,6 +122,90 @@ function readIndicesDuring(h, render) {
 	return idx;
 }
 
+function traceReadsDuring(h, render) {
+	const p = h.proc, orig = p.sourceSample.bind(p), idx = [];
+	let rel = null, dir = null;
+	p.sourceSample = (c, i) => {
+		if (rel === null) {
+			rel = p.voice.rel;
+			dir = p.voiceDirection(p.timeMap[0]);
+		}
+		idx.push(i);
+		return orig(c, i);
+	};
+	render();
+	p.sourceSample = orig;
+	return {idx, rel, dir};
+}
+
+test('F2: two-sided seam reads continue in playback order, never reflected/reversed', async () => {
+	const posMod = (x, m) => ((x%m) + m)%m;
+	const Fsec = 0.1;
+	for (const {rate, reverseStyle = null} of [
+		{rate: 1},
+		{rate: -1},
+		{rate: -1, reverseStyle: 'mirror'},
+	]) {
+		const label = `rate ${rate}, ${reverseStyle || 'grain'}`;
+		const h = await makeVoice({
+			active: true,
+			input: rate > 0 ? 0.97 : 0.53,
+			rate,
+			loopStart: S,
+			loopEnd: E,
+			loopMode: 'forward',
+			loopCrossfade: Fsec,
+			loopTrapped: true,
+			reverseStyle,
+		}, {buffer: rampBuffer({channels: 1}), channels: 1});
+		const trace = traceReadsDuring(h, () => h.render(1));
+		const n = h.proc.bufferLength;
+		const anchor = n - Math.round(h.proc.inputLatencySeconds*SR);
+		const relSamples = trace.rel*SR;
+		const loopSamples = L*SR;
+		const fadeSamples = Fsec*SR;
+		const loopStartSample = S*SR;
+		const loopEndSample = Math.round((S + L)*SR) - 1;
+		const clampLoop = i => Math.max(Math.round(loopStartSample), Math.min(loopEndSample, i));
+		let k = 0, secondaryReads = 0, recoveryReads = 0;
+		for (let j = 0; j < n; ++j) {
+			// Default Grain backward playback keeps the analysis window in source
+			// order, matching fillInputWindowSeamTaper's backwardGrain mapping.
+			const backwardGrain = trace.dir < 0 && reverseStyle !== 'mirror';
+			const delta = backwardGrain ? anchor - j : j - anchor;
+			const cp = posMod(relSamples + trace.dir*delta, loopSamples);
+			const primary = clampLoop(Math.round(loopStartSample + cp));
+			assert.equal(trace.idx[k++], primary, `${label}, sample ${j}: primary read follows authoritative phase`);
+
+			let secondary = null;
+			if (trace.dir > 0 && cp >= loopSamples - fadeSamples) {
+				// Approaching end: tail continues into the head in forward order.
+				secondary = cp - (loopSamples - fadeSamples);
+			} else if (trace.dir > 0 && cp < fadeSamples) {
+				// After wrap: recover from that continuation into the primary head.
+				secondary = fadeSamples + cp;
+				recoveryReads++;
+			} else if (trace.dir < 0 && cp < fadeSamples) {
+				// Approaching start: head continues into the tail in backward order.
+				secondary = loopSamples - fadeSamples + cp;
+			} else if (trace.dir < 0 && cp >= loopSamples - fadeSamples) {
+				// After wrap: recover from that continuation into the primary tail.
+				secondary = cp - fadeSamples;
+				recoveryReads++;
+			}
+			if (secondary !== null) {
+				const expected = clampLoop(Math.round(loopStartSample + secondary));
+				assert.equal(trace.idx[k++], expected,
+					`${label}, sample ${j}: secondary read continues in playback order`);
+				secondaryReads++;
+			}
+		}
+		assert.equal(k, trace.idx.length, `${label}: every source read belongs to the two-sided seam geometry`);
+		assert.ok(secondaryReads > 1000, `${label}: exercised the seam taper`);
+		assert.ok(recoveryReads > 100, `${label}: exercised the post-wrap recovery side`);
+	}
+});
+
 test('F2: taper reads stay strictly inside [loopStart, loopEnd)', async () => {
 	for (const rate of [1, -1]) {
 		const h = await makeVoice({active: true, input: rate > 0 ? 0.97 : 0.53, rate, loopStart: S, loopEnd: E, loopMode: 'forward', loopCrossfade: 0.15, loopTrapped: true}, {buffer: rampBuffer({})});
