@@ -1,5 +1,5 @@
-// Tests for the experimental reverseStyle segment property:
-//   'grain' (default, original), 'grain-clean' (|rate| time-factor), 'mirror'
+// Tests for the reverseStyle segment property:
+//   'grain' (default, original) and 'mirror' (tape-style reverse)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createProcessor, sineBuffer, rms, hasNaN} from './harness.mjs';
@@ -54,9 +54,9 @@ function envelopeOrientation(out) {
 
 // NOTE: coarse output envelopes follow the *traversal* (swell into the attack)
 // for every backward style - the grain/mirror difference is in fine structure.
-// The measurable win of 'grain-clean' is level stability: no phase-randomised
-// amplitude churn on tonal material.
-test('grain-clean holds a steadier level than grain on reversed tonal material', async () => {
+// Mirror's measurable advantage: forward-quality synthesis (no phase-randomised
+// amplitude churn) when travelling backward on tonal material.
+test('mirror holds a steadier level than grain on reversed tonal material', async () => {
 	async function levelChurn(reverseStyle) {
 		const h = await createProcessor({sampleRate: SR});
 		h.call('addBuffers', sineBuffer({sampleRate: SR, seconds: 2, freq: 330}));
@@ -71,9 +71,9 @@ test('grain-clean holds a steadier level than grain on reversed tonal material',
 		return sd/mean; // coefficient of variation
 	}
 	const churnGrain = await levelChurn(undefined); // default = 'grain'
-	const churnClean = await levelChurn('grain-clean');
-	assert.ok(churnClean < churnGrain*0.75,
-		`grain-clean steadier (CV ${churnClean.toFixed(4)}) than grain (CV ${churnGrain.toFixed(4)})`);
+	const churnMirror = await levelChurn('mirror');
+	assert.ok(churnMirror < churnGrain*0.75,
+		`mirror steadier (CV ${churnMirror.toFixed(4)}) than grain (CV ${churnGrain.toFixed(4)})`);
 });
 
 test('mirror reverses envelopes: swells rise into the attack', async () => {
@@ -85,8 +85,8 @@ test('mirror reverses envelopes: swells rise into the attack', async () => {
 		`mirror plays swells first (swellFirst ${swellFirst} vs attackFirst ${attackFirst})`);
 });
 
-test('grain-clean and mirror renders are exactly repeatable', async () => {
-	for (const style of ['grain-clean', 'mirror']) {
+test('grain and mirror renders are exactly repeatable', async () => {
+	for (const style of ['grain', 'mirror']) {
 		const a = await renderReverseOneShot(style, 400);
 		const b = await renderReverseOneShot(style, 400);
 		for (let i = 0; i < a.length; i++) {
@@ -106,8 +106,8 @@ test('reverseStyle does not alter loop topology positions', async () => {
 		for (let q = 0; q < 300; q++) { h.render(1); traj.push(h.proc.voice.pos); }
 		return traj;
 	}
-	const [g, gc, m] = await Promise.all([positions(undefined), positions('grain-clean'), positions('mirror')]);
-	assert.deepEqual(gc, g, 'grain-clean positions match default');
+	const [g, ge, m] = await Promise.all([positions(undefined), positions('grain'), positions('mirror')]);
+	assert.deepEqual(ge, g, 'explicit grain matches default');
 	assert.deepEqual(m, g, 'mirror positions match default');
 });
 
@@ -124,10 +124,10 @@ test('mirror renders continuously across reverse-loop seams', async () => {
 	}
 });
 
-test('invalid reverseStyle values fall back to default behaviour', async () => {
+test('invalid or retired reverseStyle values fall back to default behaviour', async () => {
 	const h = await createProcessor({sampleRate: SR});
 	h.call('addBuffers', sineBuffer({sampleRate: SR, seconds: 2}));
-	h.call('schedule', {active: true, input: 0.6, rate: -1, loopStart: 0.5, loopEnd: 1.0, loopMode: 'forward', reverseStyle: 'bogus'});
+	h.call('schedule', {active: true, input: 0.6, rate: -1, loopStart: 0.5, loopEnd: 1.0, loopMode: 'forward', reverseStyle: 'grain-clean'}); // retired experimental value
 	const out = h.render(300)[0];
 	assert.ok(!hasNaN(out) && rms(out.subarray(out.length >> 1)) > 0.05, 'renders with default style');
 });

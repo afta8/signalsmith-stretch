@@ -2,15 +2,13 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 	// NOTE: this entire function is stringified into the AudioWorklet module
 	// (see the Blob construction below), so all helpers must live inside it.
 	const LOOP_MODES = {forward: true, reverse: true, pingpong: true};
-	// Backward-travel rendering styles (EXPERIMENTAL, subject to change):
+	// Backward-travel rendering styles:
 	// 'grain' (default) = original behaviour: forward-ordered analysis window,
-	//   signed seek rate (phase-randomised synthesis when travelling backward)
-	// 'grain-clean' = same window, but |rate| as the seek time-factor, keeping
-	//   the clean phase-prediction path when travelling backward
+	//   signed seek rate - each grain keeps its forward shape, sequence reversed
 	// 'mirror' = time-reversed analysis window around the mirrored position:
 	//   true tape-style reverse (attacks become swells), engine always sees a
 	//   forward-moving signal
-	const REVERSE_STYLES = {grain: true, 'grain-clean': true, mirror: true};
+	const REVERSE_STYLES = {grain: true, mirror: true};
 	// Positive modulo (result in [0, m) for m > 0, both signs of x)
 	const posMod = (x, m) => ((x%m) + m)%m;
 
@@ -632,10 +630,8 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 						wasmModule._seek(this.bufferLength, Math.abs(seg.rate));
 					} else {
 						this.fillInputWindow(memory, outputList, Math.round((v.pos + this.inputLatencySeconds)*sampleRate));
-						// 'grain': seek direction follows the actual travel (rate sign x
-						// loop leg) - backward travel takes the phase-randomised path.
-						// 'grain-clean': |rate| keeps the clean phase-prediction path.
-						wasmModule._seek(this.bufferLength, style === 'grain-clean' ? Math.abs(seg.rate) : dir*Math.abs(seg.rate));
+						// 'grain': seek direction follows the actual travel (rate sign x loop leg)
+						wasmModule._seek(this.bufferLength, dir*Math.abs(seg.rate));
 					}
 					// reported time matches the audible loop position and direction
 					reportTime = this.peekVoice(seg, this.inputLatencySeconds);

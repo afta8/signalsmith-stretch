@@ -70,9 +70,8 @@
 	<label class="ctl"><input type="checkbox" id="loopOn" checked> loop enabled</label>
 	<fieldset><legend>reverse style (A/B live)</legend>
 		<div class="pill" id="revStyle">
-			<label><input type="radio" name="rev" value="grain" checked><span>Grain (current)</span></label>
-			<label><input type="radio" name="rev" value="grain-clean"><span>Grain clean</span></label>
-			<label><input type="radio" name="rev" value="mirror"><span>Mirror</span></label>
+			<label><input type="radio" name="rev" value="grain" checked><span>Grain (original)</span></label>
+			<label><input type="radio" name="rev" value="mirror"><span>Mirror (tape)</span></label>
 		</div>
 	</fieldset>
 	<label class="ctl"><input type="checkbox" id="scrubOn"> drag waveform scrubs</label>
@@ -359,9 +358,9 @@ const TESTS = [
 		setup: {mat: 'tonal', mode: 'forward', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 1.0, lfoDepth: 0.2, lfoRate: 2}},
 	{name: 'High-rate boundary stress', desc: 'Rate 2 on a short ping-pong loop: reflections several times a second. Listen for exactness - no stutter accumulation, no drift of the reflection rhythm.',
 		setup: {mat: 'perc', mode: 'pingpong', rate: 2, loopStart: 1.0, loopEnd: 1.4, start: 1.0}},
-	{name: 'A/B: reverse one-shot styles', desc: 'Percussive at rate -1, no loop. Flip the reverse-style pill while it plays: Grain = hits keep their forward shape (current, smeared); Grain clean = same shape, steadier; Mirror = true tape reverse, hits become swells.',
+	{name: 'A/B: reverse one-shot styles', desc: 'Percussive at rate -1, no loop. Flip the reverse-style pill while it plays: Grain = hits keep their forward shape (original behaviour); Mirror = true tape reverse, hits become swells.',
 		setup: {mat: 'perc', mode: 'forward', rate: -1, loopStart: 0, loopEnd: 0, start: 3.8, loopOn: false, style: 'grain'}},
-	{name: 'A/B: reverse loop tone', desc: 'Tonal reverse loop. Grain: level churns and fizzes (phase randomisation). Grain clean: steadier, listen for any phasey swirl instead. Mirror: cleanest, forward-quality synthesis.',
+	{name: 'A/B: reverse loop tone', desc: 'Tonal reverse loop. Grain: level churns and fizzes (phase randomisation). Mirror: forward-quality synthesis, steady level.',
 		setup: {mat: 'tonal', mode: 'reverse', rate: 1, loopStart: 1.0, loopEnd: 2.5, start: 1.0, style: 'grain'}},
 	{name: 'A/B: scrub styles', desc: 'Scrubbing enabled - drag across the waveform, including quick back-and-forth jiggles. Compare styles for smear, gaps and how direction flips feel. This is the case most like Aura scrub gestures.',
 		setup: {mat: 'perc', mode: 'forward', rate: 1, loopStart: 0, loopEnd: 0, start: 1.0, loopOn: false, style: 'grain', scrub: true}},

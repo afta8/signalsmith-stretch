@@ -29,6 +29,7 @@ This adds a scheduled change, removing any scheduled changes occuring after this
 * `loopStart` (seconds) / `loopEnd` (seconds): sets a section of the input buffer to auto-loop.  Disabled if both are set to the same value.
 * `loopMode` (`'forward'` | `'reverse'` | `'pingpong'`, optional): loop topology.  When unset, the original (positive-rate forward) looping behaviour is used unchanged.
 * `playStart` / `playEnd` (seconds, optional): directional one-shot end boundaries for the natural-end notification (see `stretch.onended`).  They may sit inside the loaded sample and default to the loaded-material edges.  They only affect the notification - rendering is not stopped or silenced.
+* `reverseStyle` (`'grain'` | `'mirror'`, optional): rendering character for backward travel (negative-rate playback, scrubs, and the backward legs of `reverse`/`pingpong` loops).  `'grain'` (the default) is the original behaviour: each analysis grain keeps its forward shape while the sequence plays backward.  `'mirror'` is true tape-style reverse: the analysis window is time-reversed, so attacks become swells, the synthesis keeps forward quality, and ping-pong reflections are continuous palindromes.  Setting `reverseStyle` on a segment without `loopMode` opts it into the loop engine (`loopMode: 'forward'`), so one-shots and scrubs can use it.
 
 If the node is processing live input (not a buffer) then `input`/`rate`/`loopStart`/`loopEnd`/`loopMode` are ignored.
 
