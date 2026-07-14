@@ -319,18 +319,23 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			return chans[c%chans.length][i - start];
 		}
 
-		// Cyclic composite fill for crossfaded wrapping loops: the window is
-		// synthesised along the travel path through the shortened cycle
-		// (L - F), with the equal-power seam blend baked in, so the engine
-		// sees a continuous cyclic signal with no discontinuity. One voice,
-		// one process() call; both blend contributions share the topology walk
-		// (mirror therefore reverses them coherently, with a single fade).
-		fillInputWindowCyclic(memory, outputList, seg, dir, style, Lsec, Fsec) {
+		// Duration-preserving in-loop seam taper for crossfaded wrapping loops.
+		// The analysis window is synthesised along the travel path over the FULL
+		// loop length L (phase clock unchanged - crossfade never alters duration
+		// or the reported playhead). Only the rendered values within F of the
+		// wrap seam are modified: there, the primary read source(S + cp) is
+		// equal-power-blended toward its seam reflection source(S + (L - cp)),
+		// with weight = (distance to seam)/F. This makes the window C0-continuous
+		// across the wrap (removing the raw source(E)->source(S) step) using only
+		// in-loop material, at the cost of a short reflected-material region in
+		// the seam whose residual is documented and measured (never a period
+		// change, never an out-of-loop read). One voice, one process() call.
+		fillInputWindowSeamTaper(memory, outputList, seg, dir, style, Lsec, Fsec) {
 			let n = this.bufferLength;
 			let S = seg.loopStart*sampleRate;
 			let L = Lsec*sampleRate;
 			let F = Fsec*sampleRate;
-			let cyc = L - F;
+			let loEnd = Math.round(S + L) - 1; // last strictly-in-loop sample index
 			let relS = this.voice.rel*sampleRate;
 			let anchor = n - Math.round(this.inputLatencySeconds*sampleRate);
 			// grain keeps its source-ordered window for backward travel
@@ -338,29 +343,32 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			// travel are travel-ordered
 			let backwardGrain = (dir < 0 && style !== 'mirror');
 			let halfPi = Math.PI*0.5;
+			let clampLoop = i => (i < S ? Math.round(S) : (i > loEnd ? loEnd : i));
 			for (let c = 0; c < this.channels; ++c) {
 				let view = new Float32Array(memory, this.buffersIn[c], n);
 				this._readSeg = 0;
 				this._readSegStart = this.audioBuffersStart;
 				for (let j = 0; j < n; ++j) {
 					let delta = backwardGrain ? (anchor - j) : (j - anchor);
-					let x = relS + dir*delta;
-					// direction-aware cycle position: positive travel lives on
-					// [F, L] with seam L->F, negative on [0, L-F] with seam 0->L-F
-					let cp = (dir > 0) ? F + posMod(x - F, cyc) : posMod(x, cyc);
-					let value;
-					if (dir > 0 && cp >= L - F) {
-						let w = (cp - (L - F))/F;
-						value = Math.cos(w*halfPi)*this.sourceSample(c, Math.round(S + cp))
-							+ Math.sin(w*halfPi)*this.sourceSample(c, Math.round(S + cp - (L - F)));
-					} else if (dir < 0 && cp <= F) {
-						let w = (F - cp)/F;
-						value = Math.cos(w*halfPi)*this.sourceSample(c, Math.round(S + cp))
-							+ Math.sin(w*halfPi)*this.sourceSample(c, Math.round(S + L - (F - cp)));
+					let cp = posMod(relS + dir*delta, L); // full-L phase position
+					let primary = this.sourceSample(c, clampLoop(Math.round(S + cp)));
+					// Taper only the side the voice is APPROACHING the seam from:
+					// forward travel taps the tail [L-F, L); backward the head
+					// [0, F). ds = distance to the seam. The primary is blended
+					// toward the seam reflection source(S + (L - cp)), which at the
+					// seam converges to the material on the far side (source(S) for
+					// forward, source(E) for backward) - so the window meets the
+					// post-wrap body continuously, using only in-loop reads.
+					let ds = -1;
+					if (dir > 0 && cp >= L - F) ds = L - cp;
+					else if (dir < 0 && cp < F) ds = cp;
+					if (ds >= 0) {
+						let w = Math.sin((ds/F)*halfPi); // primary gain (1 at edge, 0 at seam)
+						let reflect = this.sourceSample(c, clampLoop(Math.round(S + (L - cp))));
+						view[j] = w*primary + Math.cos((ds/F)*halfPi)*reflect;
 					} else {
-						value = this.sourceSample(c, Math.round(S + cp));
+						view[j] = primary;
 					}
-					view[j] = value;
 				}
 			}
 		}
@@ -419,17 +427,6 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			let L = this.loopLength(seg);
 			if (!L) return 0;
 			return Math.min(cf, L*0.5);
-		}
-
-		// Overlap-consumption wrap: with a crossfade the incoming head [0,F] is
-		// already played inside the fade, so the effective cycle is L - F.
-		// Positive travel wraps L -> F (+ overshoot); negative wraps 0 -> L - F.
-		// Values already inside [0, L] pass through (e.g. a first pass through
-		// the consumed zone after entry plays it once, like any sampler).
-		wrapCycleRel(x, L, F) {
-			if (x > L) return F + posMod(x - L, L - F);
-			if (x < 0) return (L - F) - posMod(-x, L - F);
-			return x;
 		}
 
 		// Sync voice state when the current time-map segment changes: explicit
@@ -547,11 +544,13 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 
 		travelTrapped(seg, travel, L) {
 			let v = this.voice;
-			let F = this.effectiveCrossfade(seg);
+			// The topology clock always advances/wraps over the full loop length L,
+			// independent of loopCrossfade: the crossfade is a seam-rendering effect
+			// only (see fillInputWindowSeamTaper) and must never change duration,
+			// phase, wrap cadence, or reported inputTime.
 			if (seg.loopMode === 'forward') {
-				// wraps end-to-start at positive rates, start-to-end at negative;
-				// with a crossfade the wrap skips the consumed overlap (cycle L - F)
-				v.rel = (F > 0) ? this.wrapCycleRel(v.rel + travel, L, F) : posMod(v.rel + travel, L);
+				// wraps end-to-start at positive rates, start-to-end at negative
+				v.rel = posMod(v.rel + travel, L);
 				v.pos = seg.loopStart + v.rel;
 			} else if (seg.loopMode === 'pingpong') {
 				// phase in [0,2L): first half is the rate-sign leg, second half
@@ -575,10 +574,10 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					}
 				} else {
 					// after the turn the loop cycles against the rate sign,
-					// wrapping (not reflecting) at the boundaries; the crossfaded
-					// wrap skips the consumed overlap (the initial turnaround
-					// above is a reflection and never crossfades)
-					v.rel = (F > 0) ? this.wrapCycleRel(v.rel - travel, L, F) : posMod(v.rel - travel, L);
+					// wrapping (not reflecting) at the boundaries over the full L
+					// (the initial turnaround above is a reflection, never a
+					// crossfaded seam)
+					v.rel = posMod(v.rel - travel, L);
 				}
 				v.pos = seg.loopStart + v.rel;
 			}
@@ -639,9 +638,9 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			let rateSign = Math.sign(seg.rate) || v.lastDir;
 			let travel = rateSign*lookahead;
 			if (!v.trapped || !L) return v.pos + travel;
-			let F = this.effectiveCrossfade(seg);
+			// full-L clock (crossfade never affects reported position; see travelTrapped)
 			if (seg.loopMode === 'forward') {
-				return seg.loopStart + ((F > 0) ? this.wrapCycleRel(v.rel + travel, L, F) : posMod(v.rel + travel, L));
+				return seg.loopStart + posMod(v.rel + travel, L);
 			} else if (seg.loopMode === 'pingpong') {
 				let phi = posMod(v.rel + travel, 2*L);
 				return seg.loopStart + ((phi < L) ? phi : 2*L - phi);
@@ -653,7 +652,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				return seg.loopStart + relLin;
 			}
 			// reverse, cycling
-			return seg.loopStart + ((F > 0) ? this.wrapCycleRel(v.rel - travel, L, F) : posMod(v.rel - travel, L));
+			return seg.loopStart + posMod(v.rel - travel, L);
 		}
 
 		process(inputList, outputList, parameters) {
@@ -745,15 +744,13 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					let style = seg.reverseStyle || 'grain';
 					let Fsec = this.effectiveCrossfade(seg);
 					let Lsec = this.loopLength(seg);
-					// crossfaded cyclic fill: wrapping topologies only (never
-					// ping-pong, never reverse's pre-turn approach), trapped, and
-					// with the phase inside the direction's cycle domain (a first
-					// pass through the consumed zone plays plain, once)
-					let cyclic = Fsec > 0 && v.trapped
-						&& (seg.loopMode === 'forward' || (seg.loopMode === 'reverse' && v.turned))
-						&& (dir > 0 ? v.rel >= Fsec : v.rel <= Lsec - Fsec);
-					if (cyclic) {
-						this.fillInputWindowCyclic(memory, outputList, seg, dir, style, Lsec, Fsec);
+					// seam-tapered fill: wrapping topologies only (never ping-pong,
+					// never reverse's pre-turn approach), and only once trapped.
+					// The topology clock is unchanged; this only softens the seam.
+					let tapered = Fsec > 0 && v.trapped
+						&& (seg.loopMode === 'forward' || (seg.loopMode === 'reverse' && v.turned));
+					if (tapered) {
+						this.fillInputWindowSeamTaper(memory, outputList, seg, dir, style, Lsec, Fsec);
 						wasmModule._seek(this.bufferLength, (style === 'mirror' && dir < 0) ? Math.abs(seg.rate) : dir*Math.abs(seg.rate));
 					} else if (style === 'mirror' && dir < 0) {
 						// time-reversed window with the lookahead facing the travel
