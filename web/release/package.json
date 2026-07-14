@@ -9,7 +9,7 @@
 	},
 	"type": "module",
 	"scripts": {
-		"test": "node --test ../test/topology.test.mjs ../test/audio.test.mjs ../test/reverse-style.test.mjs ../test/ended.test.mjs"
+		"test": "node --test ../test/topology.test.mjs ../test/audio.test.mjs ../test/reverse-style.test.mjs ../test/ended.test.mjs ../test/handoff-seed.test.mjs"
 	},
 	"repository": {
 		"type": "git",

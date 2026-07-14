@@ -29,6 +29,7 @@ This adds a scheduled change, removing any scheduled changes occuring after this
 * `loopStart` (seconds) / `loopEnd` (seconds): sets a section of the input buffer to auto-loop.  Disabled if both are set to the same value.
 * `loopMode` (`'forward'` | `'reverse'` | `'pingpong'`, optional): loop topology.  When unset, the original (positive-rate forward) looping behaviour is used unchanged.
 * `playStart` / `playEnd` (seconds, optional): directional one-shot end boundaries for the natural-end notification (see `stretch.onended`).  They may sit inside the loaded sample and default to the loaded-material edges.  They only affect the notification - rendering is not stopped or silenced.
+* `loopTrapped` (bool) / `loopLeg` (`1` | `-1`) / `lastDirection` (`1` | `-1`) (optional, **onset-only**): loop-state seeds for engine handoffs — see "Seeding loop state" below.
 * `reverseStyle` (`'grain'` | `'mirror'`, optional): rendering character for backward travel (negative-rate playback, scrubs, and the backward legs of `reverse`/`pingpong` loops).  `'grain'` (the default) is the original behaviour: each analysis grain keeps its forward shape while the sequence plays backward.  `'mirror'` is true tape-style reverse: the analysis window is time-reversed, so attacks become swells, the synthesis keeps forward quality, and ping-pong reflections are continuous palindromes.  Setting `reverseStyle` on a segment without `loopMode` opts it into the loop engine (`loopMode: 'forward'`), so one-shots and scrubs can use it.
 
 If the node is processing live input (not a buffer) then `input`/`rate`/`loopStart`/`loopEnd`/`loopMode` are ignored.
@@ -48,6 +49,28 @@ Behaviour rules shared by all modes:
 * Moving `loopStart`/`loopEnd` while playback is inside the loop keeps it trapped and phase-maps it into the new window; moving markers before entry doesn't override start reachability.
 * Setting invalid or zero-width bounds (`loopEnd <= loopStart`) safely disables looping and releases the voice to ordinary one-shot traversal.
 * High rates that cross one or more loop lengths within a render quantum are handled exactly (analytic wrap/reflect), independent of render-quantum size and free of cumulative drift.
+
+### Seeding loop state (onset handoffs)
+
+When initialising a new explicit-input onset that should *continue* existing loop
+topology (e.g. handing a looping voice over from another playback engine), the same
+`schedule()` call that carries `input` can seed the voice state:
+
+* `loopTrapped` (bool): start already trapped in the loop instead of re-evaluating
+  start-position reachability.  If the provided `input` lies outside the loop window it
+  is phase-mapped in.  Ignored when the loop bounds are invalid/zero-width.
+* `loopLeg` (`1` | `-1`, default `1`): the current loop leg — `1` is the rate-sign
+  ("first"/Forward) leg, `-1` the return leg, following the direction model
+  `actual direction = rate sign x leg`.  For `reverse` mode, `-1` means the initial
+  turn has already happened; for `forward` mode the leg is ignored.
+* `lastDirection` (`1` | `-1`): seeds the last non-zero actual direction, so a
+  handoff at `rate: 0` holds with the correct orientation and resumes correctly.
+
+These work for all three loop modes, both rate signs, and rate zero.  They are
+**onset-only**: consumed by the call that carries them (alongside an explicit `input`)
+and never inherited by later segments — a later plain scrub resets to untrapped and
+re-evaluates reachability as normal.  Omitting them preserves the existing
+explicit-input behaviour exactly.
 
 ### `stretch.onended`
 

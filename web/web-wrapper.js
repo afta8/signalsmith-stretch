@@ -118,6 +118,12 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					if (obj.reverseStyle != null && obj.loopMode == null) obj.loopMode = 'forward';
 					if (obj.playStart != null && !isFinite(obj.playStart)) obj.playStart = null;
 					if (obj.playEnd != null && !isFinite(obj.playEnd)) obj.playEnd = null;
+					// Loop-state seeds for onset handoffs. Onset-only contract: they
+					// apply only via the call that carries them (with an explicit
+					// input) and are never inherited by later segments.
+					obj.loopTrapped = ('loopTrapped' in objIn) ? !!objIn.loopTrapped : false;
+					obj.loopLeg = (objIn.loopLeg === -1) ? -1 : 1;
+					obj.lastDirection = ('lastDirection' in objIn) ? (Math.sign(objIn.lastDirection) || 0) : 0;
 					if (obj.input === null) {
 						let rate = (latestSegment.active ? latestSegment.rate : 0);
 						if (latestSegment.loopMode != null && latestSegment === this.voice.segment) {
@@ -352,6 +358,26 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				v.trapped = false;
 				v.turned = false;
 				v.rel = 0;
+				v.endedNotified = false;
+				if (seg.lastDirection) v.lastDir = seg.lastDirection;
+				if (seg.loopTrapped) {
+					// Onset handoff: seed existing loop-topology state instead of
+					// re-evaluating reachability. loopLeg 1 = the rate-sign leg,
+					// -1 = the return leg (actual direction = rate sign x leg).
+					let L = this.loopLength(seg);
+					if (L) {
+						let a = seg.input - seg.loopStart;
+						if (a < 0 || a > L) a = posMod(a, L); // phase-map, keeping the closed top edge
+						v.trapped = true;
+						if (seg.loopMode === 'pingpong') {
+							v.rel = (seg.loopLeg === -1) ? posMod(2*L - a, 2*L) : a;
+						} else {
+							v.rel = a;
+							v.turned = (seg.loopMode === 'reverse' && seg.loopLeg === -1);
+						}
+						v.pos = seg.loopStart + a;
+					}
+				}
 			} else {
 				// Continuation segment (rate/pitch/marker/mode changes): keep the
 				// integrated position; main-thread extrapolation is not trusted
