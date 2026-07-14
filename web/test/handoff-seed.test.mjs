@@ -105,3 +105,68 @@ test('seeding at the exact loop-end boundary lands on the correct leg', async ()
 	const t = trajectory(h, 50);
 	assert.ok(t[10] < 1.0 && t[10] > 0.9, `descending from loop end (${t[10].toFixed(3)})`);
 });
+
+test('future-scheduled seeded onset holds its authoritative phase until activation', async () => {
+	const h = await createProcessor({sampleRate: SR});
+	h.call('addBuffers', sineBuffer({sampleRate: SR, seconds: 2}));
+	// Match Aura's handoff topology: the command is delivered with substantial
+	// lead, while output/outputTime identify the shared future activation frame.
+	h.render(308); // 0.821333s; comfortably before the 1.0s activation
+	h.call('schedule', {
+		active: true,
+		input: 0.7,
+		output: 1,
+		outputTime: 1,
+		rate: 1,
+		...LOOP,
+		loopMode: 'forward',
+		loopTrapped: true,
+	});
+
+	let renderedBeforeActivation = 0;
+	while (h.renderedSeconds + h.proc.outputLatencySeconds < 1 - 1e-9) {
+		h.render(1);
+		renderedBeforeActivation++;
+		assert.ok(Math.abs(h.proc.voice.pos - 0.7) < 1e-9,
+			`phase held before activation (got ${h.proc.voice.pos.toFixed(6)})`);
+	}
+	assert.ok(renderedBeforeActivation > 10, 'exercised multiple pre-activation render quanta');
+
+	h.render(2);
+	assert.ok(h.proc.voice.pos > 0.7, 'phase begins advancing once activation is reached');
+});
+
+test('future-onset phase hold covers signed rates and seeded topology return legs', async () => {
+	const cases = [
+		{name: 'Forward negative Rate', input: 0.8, rate: -1, loopMode: 'forward', after: p => p < 0.8},
+		{name: 'Reverse return leg', input: 0.8, rate: 1, loopMode: 'reverse', loopLeg: -1, after: p => p < 0.8},
+		{name: 'Reverse return leg, negative Rate', input: 0.7, rate: -1, loopMode: 'reverse', loopLeg: -1, after: p => p > 0.7},
+		{name: 'Ping-Pong return leg', input: 0.8, rate: 1, loopMode: 'pingpong', loopLeg: -1, after: p => p < 0.8},
+		{name: 'Ping-Pong return leg, negative Rate', input: 0.7, rate: -1, loopMode: 'pingpong', loopLeg: -1, after: p => p > 0.7},
+		{name: 'Rate-zero hold', input: 0.75, rate: 0, loopMode: 'pingpong', loopLeg: -1, lastDirection: -1, after: p => Math.abs(p - 0.75) < 1e-9},
+	];
+	for (const c of cases) {
+		const h = await createProcessor({sampleRate: SR});
+		h.call('addBuffers', sineBuffer({sampleRate: SR, seconds: 2}));
+		h.render(308);
+		h.call('schedule', {
+			active: true,
+			input: c.input,
+			output: 1,
+			outputTime: 1,
+			rate: c.rate,
+			...LOOP,
+			loopMode: c.loopMode,
+			loopTrapped: true,
+			loopLeg: c.loopLeg,
+			lastDirection: c.lastDirection,
+		});
+		while (h.renderedSeconds + h.proc.outputLatencySeconds < 1 - 1e-9) {
+			h.render(1);
+			assert.ok(Math.abs(h.proc.voice.pos - c.input) < 1e-9,
+				`${c.name}: phase held before activation`);
+		}
+		h.render(2);
+		assert.ok(c.after(h.proc.voice.pos), `${c.name}: expected post-activation travel/hold (${h.proc.voice.pos})`);
+	}
+});

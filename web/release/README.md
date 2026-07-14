@@ -59,18 +59,21 @@ Behaviour rules shared by all modes:
 * **Reverse**: only the wrapping seam *after* the initial turnaround.  The initial turn is a reflection, not a discontinuous wrap, and is never crossfaded.
 * **Ping-pong**: no effect (it reflects, so there is no discontinuous wrap).  The requested value is retained and becomes active again if you switch to Forward or Reverse.
 
+**Duration-preserving invariant.**  Loop crossfade softens a wrapping seam **without changing the loop's source duration or phase cadence**.  The loop period is exactly `loopLength / abs(rate)` regardless of `loopCrossfade`; the crossfade affects rendered audio only.  It never changes `inputTime`, the reported playhead, the wrap cadence, the topology leg/direction, trap/turn positions, or scheduling — a voice with `loopCrossfade > 0` follows exactly the same position trajectory as the same voice at `loopCrossfade = 0`.
+
 Rules:
 
 * Unit is source/input seconds, consistent with `loopStart`/`loopEnd`.  Negative, non-finite or non-numeric values normalise to `0`.
 * The effective crossfade is clamped to half the loop width: `min(loopCrossfade, (loopEnd - loopStart) / 2)`.
-* It is inherited by continuation segments like ordinary parameters, and can be changed live without retriggering, resetting pitch, or releasing the loop trap.  A change that invalidates the current phase is mapped deterministically into the new cycle.
-* Both the outgoing and incoming sides of the blend are always read from **inside** the loop.
+* It is inherited by continuation segments like ordinary parameters, and can be changed live — including across a seam — without retriggering, resetting pitch, changing the tempo, or releasing the loop trap.
+* All seam reads stay strictly **inside** `[loopStart, loopEnd)`; no material from outside the loop is used.
+* The taper is two-sided: it blends into same-direction material while approaching the wrap, then recovers to the authoritative phase after the wrap.  It never reflects or reverses source material.
 
-**Overlap consumption (cycle shortening).**  The incoming material heard during the fade is treated as already played, so the effective loop cycle becomes `loopEnd - loopStart - loopCrossfade`.  After a wrap, traversal continues past the consumed overlap rather than replaying it (positive travel resumes near `loopStart + loopCrossfade`, negative near `loopEnd - loopCrossfade`).  `inputTime` reports this primary playhead on the shortened cycle.  This is what prevents the start of the loop being heard once inside the crossfade and then again immediately after it.
+`reverseStyle` (`'grain'`/`'mirror'`) is fully compatible: the seam timing, duration and reported playhead are identical across styles; only the established backward-rendering character differs.
 
-`reverseStyle` (`'grain'`/`'mirror'`) is fully compatible: the seam timing, overlap consumption and reported playhead are identical across styles; only the established backward-rendering character differs.
+The implementation uses a **single** Signalsmith voice and one `process()` call per block — the seam is smoothed by synthesising the near-seam region of the analysis input in the worklet; there is no second voice.
 
-The implementation uses a **single** Signalsmith voice and one `process()` call per block — the crossfaded cyclic signal is synthesised into the analysis input in the worklet; there is no second voice.  On strongly correlated tonal material the equal-power overlap can introduce mild, expected phasing during the fade.
+**Seam-quality note.**  Because a duration-preserving loop reads only in-loop audio, the seam discontinuity cannot be made perfectly transparent the way a cycle-shortening crossfade can (that would change the tempo).  The taper makes the seam substantially smoother than no crossfade — and never clickier — but a small residual can remain; on strongly correlated tonal material the equal-power blend can also introduce mild phasing or a brief level change in the fade region.  The phase-vocoder overlap-add tends to mask what remains.  Preserving duration and phase takes priority over fully erasing the seam.
 
 ### Seeding loop state (onset handoffs)
 
