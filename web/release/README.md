@@ -31,8 +31,9 @@ This adds a scheduled change, removing any scheduled changes occuring after this
 * `playStart` / `playEnd` (seconds, optional): directional one-shot end boundaries for the natural-end notification (see `stretch.onended`).  They may sit inside the loaded sample and default to the loaded-material edges.  They only affect the notification - rendering is not stopped or silenced.
 * `loopTrapped` (bool) / `loopLeg` (`1` | `-1`) / `lastDirection` (`1` | `-1`) (optional, **onset-only**): loop-state seeds for engine handoffs — see "Seeding loop state" below.
 * `reverseStyle` (`'grain'` | `'mirror'`, optional): rendering character for backward travel (negative-rate playback, scrubs, and the backward legs of `reverse`/`pingpong` loops).  `'grain'` (the default) is the original behaviour: each analysis grain keeps its forward shape while the sequence plays backward.  `'mirror'` is true tape-style reverse: the analysis window is time-reversed, so attacks become swells, the synthesis keeps forward quality, and ping-pong reflections are continuous palindromes.  Setting `reverseStyle` on a segment without `loopMode` opts it into the loop engine (`loopMode: 'forward'`), so one-shots and scrubs can use it.
+* `loopCrossfade` (seconds, optional, default `0`): equal-power crossfade across the discontinuous loop seam — see "Loop crossfade" below.
 
-If the node is processing live input (not a buffer) then `input`/`rate`/`loopStart`/`loopEnd`/`loopMode` are ignored.
+If the node is processing live input (not a buffer) then `input`/`rate`/`loopStart`/`loopEnd`/`loopMode`/`loopCrossfade` are ignored.
 
 ### Loop modes
 
@@ -49,6 +50,27 @@ Behaviour rules shared by all modes:
 * Moving `loopStart`/`loopEnd` while playback is inside the loop keeps it trapped and phase-maps it into the new window; moving markers before entry doesn't override start reachability.
 * Setting invalid or zero-width bounds (`loopEnd <= loopStart`) safely disables looping and releases the voice to ordinary one-shot traversal.
 * High rates that cross one or more loop lengths within a render quantum are handled exactly (analytic wrap/reflect), independent of render-quantum size and free of cumulative drift.
+
+### Loop crossfade
+
+`loopCrossfade` (seconds) blends the otherwise-discontinuous loop seam with an equal-power crossfade, in the style of a sampler loop crossfade.  It applies only when a native `loopMode` is active (it does not opt a legacy segment into the loop engine), and only to the **wrapping** seam of a topology:
+
+* **Forward**: every wrap (loop end → loop start at positive rate, loop start → loop end at negative rate).
+* **Reverse**: only the wrapping seam *after* the initial turnaround.  The initial turn is a reflection, not a discontinuous wrap, and is never crossfaded.
+* **Ping-pong**: no effect (it reflects, so there is no discontinuous wrap).  The requested value is retained and becomes active again if you switch to Forward or Reverse.
+
+Rules:
+
+* Unit is source/input seconds, consistent with `loopStart`/`loopEnd`.  Negative, non-finite or non-numeric values normalise to `0`.
+* The effective crossfade is clamped to half the loop width: `min(loopCrossfade, (loopEnd - loopStart) / 2)`.
+* It is inherited by continuation segments like ordinary parameters, and can be changed live without retriggering, resetting pitch, or releasing the loop trap.  A change that invalidates the current phase is mapped deterministically into the new cycle.
+* Both the outgoing and incoming sides of the blend are always read from **inside** the loop.
+
+**Overlap consumption (cycle shortening).**  The incoming material heard during the fade is treated as already played, so the effective loop cycle becomes `loopEnd - loopStart - loopCrossfade`.  After a wrap, traversal continues past the consumed overlap rather than replaying it (positive travel resumes near `loopStart + loopCrossfade`, negative near `loopEnd - loopCrossfade`).  `inputTime` reports this primary playhead on the shortened cycle.  This is what prevents the start of the loop being heard once inside the crossfade and then again immediately after it.
+
+`reverseStyle` (`'grain'`/`'mirror'`) is fully compatible: the seam timing, overlap consumption and reported playhead are identical across styles; only the established backward-rendering character differs.
+
+The implementation uses a **single** Signalsmith voice and one `process()` call per block — the crossfaded cyclic signal is synthesised into the analysis input in the worklet; there is no second voice.  On strongly correlated tonal material the equal-power overlap can introduce mild, expected phasing during the fade.
 
 ### Seeding loop state (onset handoffs)
 

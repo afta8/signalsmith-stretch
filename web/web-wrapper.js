@@ -24,6 +24,8 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			this.audioBuffers = []; // list of (multi-channel) audio buffers
 			this.audioBuffersStart = 0; // time-stamp for the first audio buffer
 			this.audioBuffersEnd = 0; // just to be helpful
+			this._readSeg = 0; // sourceSample() cursor cache
+			this._readSegStart = 0;
 			
 			this.timeIntervalSamples = sampleRate*0.1;
 			this.timeIntervalCounter = 0;
@@ -41,7 +43,8 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				loopStart: 0,
 				loopEnd: 0,
 				loopMode: null, /* null = original behaviour, or 'forward'/'reverse'/'pingpong' */
-				reverseStyle: null, /* null = 'grain' (original); or 'grain-clean'/'mirror' */
+				loopCrossfade: 0, /* seconds of equal-power seam crossfade (wrapping topologies) */
+				reverseStyle: null, /* null = 'grain' (original); or 'mirror' */
 				playStart: null, /* one-shot end boundary when travelling backward (null = start of loaded audio) */
 				playEnd: null, /* one-shot end boundary when travelling forward (null = end of loaded audio) */
 				hasExplicitInput: false
@@ -118,6 +121,9 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					if (obj.reverseStyle != null && obj.loopMode == null) obj.loopMode = 'forward';
 					if (obj.playStart != null && !isFinite(obj.playStart)) obj.playStart = null;
 					if (obj.playEnd != null && !isFinite(obj.playEnd)) obj.playEnd = null;
+					// crossfade: seconds, inherited like ordinary parameters; invalid -> 0.
+					// It does not opt a legacy segment into the loop engine.
+					if (typeof obj.loopCrossfade !== 'number' || !isFinite(obj.loopCrossfade) || obj.loopCrossfade < 0) obj.loopCrossfade = 0;
 					// Loop-state seeds for onset handoffs. Onset-only contract: they
 					// apply only via the call that carries them (with an explicit
 					// input) and are never inherited by later segments.
@@ -297,6 +303,68 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			});
 		}
 
+		// Random-access source read (absolute sample index), zero outside the
+		// stored audio. Cursor-cached across calls for near-monotonic access;
+		// exact for any segmented addBuffers() layout.
+		sourceSample(c, i) {
+			if (i < this.audioBuffersStart || i >= this.audioBuffersEnd) return 0;
+			let bufs = this.audioBuffers;
+			let k = this._readSeg, start = this._readSegStart;
+			if (k >= bufs.length) { k = 0; start = this.audioBuffersStart; }
+			while (i < start) { --k; start -= bufs[k][0].length; }
+			while (i >= start + bufs[k][0].length) { start += bufs[k][0].length; ++k; }
+			this._readSeg = k;
+			this._readSegStart = start;
+			let chans = bufs[k];
+			return chans[c%chans.length][i - start];
+		}
+
+		// Cyclic composite fill for crossfaded wrapping loops: the window is
+		// synthesised along the travel path through the shortened cycle
+		// (L - F), with the equal-power seam blend baked in, so the engine
+		// sees a continuous cyclic signal with no discontinuity. One voice,
+		// one process() call; both blend contributions share the topology walk
+		// (mirror therefore reverses them coherently, with a single fade).
+		fillInputWindowCyclic(memory, outputList, seg, dir, style, Lsec, Fsec) {
+			let n = this.bufferLength;
+			let S = seg.loopStart*sampleRate;
+			let L = Lsec*sampleRate;
+			let F = Fsec*sampleRate;
+			let cyc = L - F;
+			let relS = this.voice.rel*sampleRate;
+			let anchor = n - Math.round(this.inputLatencySeconds*sampleRate);
+			// grain keeps its source-ordered window for backward travel
+			// (ascending index = descending travel offset); mirror and forward
+			// travel are travel-ordered
+			let backwardGrain = (dir < 0 && style !== 'mirror');
+			let halfPi = Math.PI*0.5;
+			for (let c = 0; c < this.channels; ++c) {
+				let view = new Float32Array(memory, this.buffersIn[c], n);
+				this._readSeg = 0;
+				this._readSegStart = this.audioBuffersStart;
+				for (let j = 0; j < n; ++j) {
+					let delta = backwardGrain ? (anchor - j) : (j - anchor);
+					let x = relS + dir*delta;
+					// direction-aware cycle position: positive travel lives on
+					// [F, L] with seam L->F, negative on [0, L-F] with seam 0->L-F
+					let cp = (dir > 0) ? F + posMod(x - F, cyc) : posMod(x, cyc);
+					let value;
+					if (dir > 0 && cp >= L - F) {
+						let w = (cp - (L - F))/F;
+						value = Math.cos(w*halfPi)*this.sourceSample(c, Math.round(S + cp))
+							+ Math.sin(w*halfPi)*this.sourceSample(c, Math.round(S + cp - (L - F)));
+					} else if (dir < 0 && cp <= F) {
+						let w = (F - cp)/F;
+						value = Math.cos(w*halfPi)*this.sourceSample(c, Math.round(S + cp))
+							+ Math.sin(w*halfPi)*this.sourceSample(c, Math.round(S + L - (F - cp)));
+					} else {
+						value = this.sourceSample(c, Math.round(S + cp));
+					}
+					view[j] = value;
+				}
+			}
+		}
+
 		// Copy sample-buffer audio ending at `inputSamplesEnd` (exclusive) into
 		// the target arrays, zero-padded outside the stored audio
 		fillForward(buffers, inputSamplesEnd) {
@@ -342,6 +410,26 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 		loopLength(seg) {
 			let L = seg.loopEnd - seg.loopStart;
 			return (isFinite(L) && L > 0) ? L : 0; // invalid/zero-width bounds disable looping
+		}
+
+		// Effective seam crossfade in seconds: clamped to half the loop width
+		effectiveCrossfade(seg) {
+			let cf = seg.loopCrossfade;
+			if (!(cf > 0)) return 0;
+			let L = this.loopLength(seg);
+			if (!L) return 0;
+			return Math.min(cf, L*0.5);
+		}
+
+		// Overlap-consumption wrap: with a crossfade the incoming head [0,F] is
+		// already played inside the fade, so the effective cycle is L - F.
+		// Positive travel wraps L -> F (+ overshoot); negative wraps 0 -> L - F.
+		// Values already inside [0, L] pass through (e.g. a first pass through
+		// the consumed zone after entry plays it once, like any sampler).
+		wrapCycleRel(x, L, F) {
+			if (x > L) return F + posMod(x - L, L - F);
+			if (x < 0) return (L - F) - posMod(-x, L - F);
+			return x;
 		}
 
 		// Sync voice state when the current time-map segment changes: explicit
@@ -459,9 +547,11 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 
 		travelTrapped(seg, travel, L) {
 			let v = this.voice;
+			let F = this.effectiveCrossfade(seg);
 			if (seg.loopMode === 'forward') {
-				// wraps end-to-start at positive rates, start-to-end at negative
-				v.rel = posMod(v.rel + travel, L);
+				// wraps end-to-start at positive rates, start-to-end at negative;
+				// with a crossfade the wrap skips the consumed overlap (cycle L - F)
+				v.rel = (F > 0) ? this.wrapCycleRel(v.rel + travel, L, F) : posMod(v.rel + travel, L);
 				v.pos = seg.loopStart + v.rel;
 			} else if (seg.loopMode === 'pingpong') {
 				// phase in [0,2L): first half is the rate-sign leg, second half
@@ -485,8 +575,10 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					}
 				} else {
 					// after the turn the loop cycles against the rate sign,
-					// wrapping (not reflecting) at the boundaries
-					v.rel = posMod(v.rel - travel, L);
+					// wrapping (not reflecting) at the boundaries; the crossfaded
+					// wrap skips the consumed overlap (the initial turnaround
+					// above is a reflection and never crossfades)
+					v.rel = (F > 0) ? this.wrapCycleRel(v.rel - travel, L, F) : posMod(v.rel - travel, L);
 				}
 				v.pos = seg.loopStart + v.rel;
 			}
@@ -547,8 +639,9 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			let rateSign = Math.sign(seg.rate) || v.lastDir;
 			let travel = rateSign*lookahead;
 			if (!v.trapped || !L) return v.pos + travel;
+			let F = this.effectiveCrossfade(seg);
 			if (seg.loopMode === 'forward') {
-				return seg.loopStart + posMod(v.rel + travel, L);
+				return seg.loopStart + ((F > 0) ? this.wrapCycleRel(v.rel + travel, L, F) : posMod(v.rel + travel, L));
 			} else if (seg.loopMode === 'pingpong') {
 				let phi = posMod(v.rel + travel, 2*L);
 				return seg.loopStart + ((phi < L) ? phi : 2*L - phi);
@@ -559,7 +652,8 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				if (relLin < 0 || relLin > L) relLin = posMod(relLin, L);
 				return seg.loopStart + relLin;
 			}
-			return seg.loopStart + posMod(v.rel - travel, L); // reverse, cycling
+			// reverse, cycling
+			return seg.loopStart + ((F > 0) ? this.wrapCycleRel(v.rel - travel, L, F) : posMod(v.rel - travel, L));
 		}
 
 		process(inputList, outputList, parameters) {
@@ -649,7 +743,19 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					else dir = v.lastDir; // rate zero: hold the last orientation
 
 					let style = seg.reverseStyle || 'grain';
-					if (style === 'mirror' && dir < 0) {
+					let Fsec = this.effectiveCrossfade(seg);
+					let Lsec = this.loopLength(seg);
+					// crossfaded cyclic fill: wrapping topologies only (never
+					// ping-pong, never reverse's pre-turn approach), trapped, and
+					// with the phase inside the direction's cycle domain (a first
+					// pass through the consumed zone plays plain, once)
+					let cyclic = Fsec > 0 && v.trapped
+						&& (seg.loopMode === 'forward' || (seg.loopMode === 'reverse' && v.turned))
+						&& (dir > 0 ? v.rel >= Fsec : v.rel <= Lsec - Fsec);
+					if (cyclic) {
+						this.fillInputWindowCyclic(memory, outputList, seg, dir, style, Lsec, Fsec);
+						wasmModule._seek(this.bufferLength, (style === 'mirror' && dir < 0) ? Math.abs(seg.rate) : dir*Math.abs(seg.rate));
+					} else if (style === 'mirror' && dir < 0) {
 						// time-reversed window with the lookahead facing the travel
 						// direction; engine runs forward at |rate|
 						this.fillInputWindowMirrored(memory, outputList, Math.round((v.pos - this.inputLatencySeconds)*sampleRate));

@@ -87,6 +87,7 @@
 	<label class="ctl"><span class="name">Loop start</span><input type="range" id="loopStart" min="0" max="4" step="0.001" value="1.0"><output id="loopStartOut">1.000</output></label>
 	<label class="ctl"><span class="name">Loop end</span><input type="range" id="loopEnd" min="0" max="4" step="0.001" value="2.0"><output id="loopEndOut">2.000</output></label>
 	<label class="ctl"><span class="name">Start pos</span><input type="range" id="startPos" min="0" max="4" step="0.001" value="0.5"><output id="startPosOut">0.500</output></label>
+	<label class="ctl"><span class="name">Crossfade</span><input type="range" id="xfade" min="0" max="100" step="1" value="0"><output id="xfadeOut">0% (0.000s)</output></label>
 </div>
 <div class="row">
 	<fieldset><legend>live marker modulation</legend>
@@ -97,6 +98,7 @@
 				<label><input type="radio" name="lfoT" value="both" checked><span>Window</span></label>
 				<label><input type="radio" name="lfoT" value="end"><span>End only</span></label>
 				<label><input type="radio" name="lfoT" value="start"><span>Start only</span></label>
+				<label><input type="radio" name="lfoT" value="xfade"><span>Crossfade</span></label>
 			</div>
 		</div>
 	</fieldset>
@@ -208,6 +210,8 @@ function scheduleObj(extra = {}) {
 	if (mode !== 'legacy') {
 		obj.loopMode = mode;
 		obj.reverseStyle = document.querySelector('#revStyle input:checked').value;
+		// crossfade control is a percentage; 100% == half the loop width
+		obj.loopCrossfade = effectiveCrossfade();
 	}
 	return obj;
 }
@@ -232,11 +236,17 @@ setInterval(() => {
 	lfoPhase += 2*Math.PI*parseFloat($('lfoRate').value)*dt;
 	const wob = Math.sin(lfoPhase)*depth;
 	const target = document.querySelector('#lfoTarget input:checked').value;
-	const s = parseFloat($('loopStart').value), e = parseFloat($('loopEnd').value);
 	const obj = scheduleObj();
-	if (target !== 'end') obj.loopStart = Math.max(0, s + wob);
-	if (target !== 'start') obj.loopEnd = Math.min(DUR, e + wob);
-	if (obj.loopEnd > obj.loopStart) stretch.schedule(obj);
+	if (target === 'xfade') {
+		// modulate crossfade seconds around the current setting (>= 0)
+		obj.loopCrossfade = Math.max(0, effectiveCrossfade() + wob);
+	} else {
+		const s = parseFloat($('loopStart').value), e = parseFloat($('loopEnd').value);
+		if (target !== 'end') obj.loopStart = Math.max(0, s + wob);
+		if (target !== 'start') obj.loopEnd = Math.min(DUR, e + wob);
+		if (obj.loopEnd <= obj.loopStart) return;
+	}
+	stretch.schedule(obj);
 }, 40);
 
 // ---------- Waveform / playhead ----------
@@ -260,6 +270,23 @@ function paint() {
 	if ($('loopOn').checked && e > s) {
 		wctx.fillStyle = 'rgba(90,162,255,0.13)'; wctx.fillRect(s, 0, e - s, h);
 		wctx.fillStyle = '#5aa2ff'; wctx.fillRect(s, 0, 2, h); wctx.fillRect(e - 1, 0, 2, h);
+		// crossfade fade zones: outgoing (near the seam ahead) + incoming (the
+		// head that blends in). Orientation flips with actual travel direction.
+		const F = effectiveCrossfade();
+		if (F > 0 && crossfadeActive()) {
+			const fpx = F/DUR*w, dir = visualDir();
+			// outgoing zone is at the seam the voice is travelling toward;
+			// incoming zone is the opposite edge that fades in
+			const outX = dir > 0 ? e - fpx : s, inX = dir > 0 ? s : e - fpx;
+			// ramp fill: opacity follows the equal-power out-gain across the zone
+			for (let k = 0; k < fpx; k++) {
+				const wgt = dir > 0 ? k/fpx : 1 - k/fpx; // 0..1 across source space
+				wctx.fillStyle = `rgba(255,120,90,${0.06 + 0.20*Math.cos(wgt*Math.PI/2)})`;
+				wctx.fillRect(outX + k, 0, 1, h);
+				wctx.fillStyle = `rgba(120,220,140,${0.06 + 0.20*Math.sin(wgt*Math.PI/2)})`;
+				wctx.fillRect(inX + k, 0, 1, h);
+			}
+		}
 	}
 	if (peaks) {
 		wctx.fillStyle = '#69d18c';
@@ -275,6 +302,7 @@ function paint() {
 	$('readout').textContent =
 		`inputTime ${inputTime.toFixed(3)}s   rate ${$('rate').value}   mode ${document.querySelector('#mode input:checked').value}` +
 		`   rev ${document.querySelector('#revStyle input:checked').value}` +
+		`   xfade ${crossfadeActive() ? effectiveCrossfade().toFixed(3) + 's' : 'inactive'}` +
 		`   loop [${parseFloat($('loopStart').value).toFixed(3)} .. ${parseFloat($('loopEnd').value).toFixed(3)}]` +
 		(playing ? '   playing' : '   stopped');
 	requestAnimationFrame(paint);
@@ -305,12 +333,28 @@ wave.addEventListener('pointermove', ev => {
 wave.addEventListener('pointerup', () => dragging = null);
 
 // ---------- Controls ----------
+// crossfade percentage maps to half the current loop width
+function loopWidth() { return Math.max(0, parseFloat($('loopEnd').value) - parseFloat($('loopStart').value)); }
+function crossfadeActive() { return document.querySelector('#mode input:checked').value !== 'pingpong'; }
+function effectiveCrossfade() {
+	if (!crossfadeActive()) return parseFloat($('xfade').value)/100*loopWidth()/2; // requested value retained; engine ignores it in pingpong
+	return parseFloat($('xfade').value)/100*loopWidth()/2;
+}
+// last non-zero travel direction, for visually stable fade-zone orientation at rate 0
+let lastVisualDir = 1;
+function visualDir() {
+	const r = parseFloat($('rate').value);
+	if (r !== 0) lastVisualDir = Math.sign(r);
+	return lastVisualDir;
+}
 function syncOutputs() {
 	$('rateOut').value = (+$('rate').value).toFixed(2);
 	$('pitchOut').value = $('pitch').value;
 	$('loopStartOut').value = (+$('loopStart').value).toFixed(3);
 	$('loopEndOut').value = (+$('loopEnd').value).toFixed(3);
 	$('startPosOut').value = (+$('startPos').value).toFixed(3);
+	const F = effectiveCrossfade();
+	$('xfadeOut').value = crossfadeActive() ? `${$('xfade').value}% (${F.toFixed(3)}s)` : `${$('xfade').value}% (inactive: ping-pong)`;
 	$('lfoDepthOut').value = (+$('lfoDepth').value).toFixed(3);
 	$('lfoRateOut').value = (+$('lfoRate').value).toFixed(2);
 }
@@ -319,10 +363,11 @@ for (const id of ['rate', 'pitch', 'loopStart', 'loopEnd']) {
 	$(id).addEventListener('input', () => { syncOutputs(); liveUpdate(); });
 }
 $('startPos').addEventListener('input', syncOutputs);
+$('xfade').addEventListener('input', () => { syncOutputs(); liveUpdate(); });
 $('lfoDepth').addEventListener('input', syncOutputs);
 $('lfoRate').addEventListener('input', syncOutputs);
 $('loopOn').addEventListener('change', liveUpdate);
-document.querySelectorAll('#mode input').forEach(r => r.addEventListener('change', liveUpdate));
+document.querySelectorAll('#mode input').forEach(r => r.addEventListener('change', () => { syncOutputs(); liveUpdate(); }));
 document.querySelectorAll('#revStyle input').forEach(r => r.addEventListener('change', liveUpdate));
 document.querySelectorAll('#material input').forEach(r => r.addEventListener('change', () => loadMaterial()));
 loadMaterial(); // initial waveform, before the engine exists
@@ -366,6 +411,31 @@ const TESTS = [
 		setup: {mat: 'perc', mode: 'forward', rate: 1, loopStart: 0, loopEnd: 0, start: 1.0, loopOn: false, style: 'grain', scrub: true}},
 	{name: 'A/B: mirrored ping-pong reflections', desc: 'Ping-pong across a drum bar. Grain: each reflection re-enters with forward-shaped hits. Mirror: the backward leg is true reverse and the reflection point is a continuous palindrome - listen for seamlessness at the turn.',
 		setup: {mat: 'perc', mode: 'pingpong', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 1.0, style: 'grain'}},
+	// ---- Crossfade (aura.3) ----
+	{name: 'XF: percussive fwd seam (+rate)', desc: 'Percussive forward loop with a hard seam. Start at 0% crossfade (audible click/step at the wrap), then raise Crossfade: the seam should soften. Crucially: NO duplicate of the loop start right after the wrap.',
+		setup: {mat: 'perc', mode: 'forward', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 1.0, xfade: 0}},
+	{name: 'XF: percussive fwd seam (-rate)', desc: 'Same loop at negative rate: the seam is now loopStart->loopEnd. Raise Crossfade and confirm the mirrored seam softens identically, no duplicated material, no pitch bend.',
+		setup: {mat: 'perc', mode: 'forward', rate: -1, loopStart: 1.0, loopEnd: 2.0, start: 1.9, xfade: 40}},
+	{name: 'XF: tonal forward loop', desc: 'Sustained pad, moderate crossfade. The wrap should be smooth. Expect some gentle phasing on correlated tonal material during the overlap - that is inherent to equal-power blending.',
+		setup: {mat: 'tonal', mode: 'forward', rate: 1, loopStart: 0.5, loopEnd: 2.5, start: 0.5, xfade: 35}},
+	{name: 'XF: reverse return-leg (+rate)', desc: 'Reverse mode. First turn at loopEnd is a reflection and must NOT be crossfaded. The later wrapping seams (loopStart->loopEnd, travelling backward) should be softened by the crossfade.',
+		setup: {mat: 'perc', mode: 'reverse', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 0.9, xfade: 40}},
+	{name: 'XF: reverse return-leg (-rate)', desc: 'Negative-rate reverse: first turn at loopStart (no crossfade), later forward wraps (loopEnd->loopStart) crossfaded. Mirror image of the previous test.',
+		setup: {mat: 'perc', mode: 'reverse', rate: -1, loopStart: 1.0, loopEnd: 2.0, start: 2.1, xfade: 40}},
+	{name: 'XF: full-buffer loop', desc: 'Loop spans the whole buffer with crossfade. Confirms both blend reads stay inside the loop - no silence bleeding in from beyond the buffer at the seam.',
+		setup: {mat: 'tonal', mode: 'forward', rate: 1, loopStart: 0.0, loopEnd: 4.0, start: 0.0, xfade: 30}},
+	{name: 'XF: very short loop', desc: 'Tiny forward loop with a small crossfade. High seam rate; listen that it stays stable and bounded, no runaway level.',
+		setup: {mat: 'tonal', mode: 'forward', rate: 1, loopStart: 1.5, loopEnd: 1.62, start: 1.5, xfade: 50}},
+	{name: 'XF: grain vs mirror (reverse loop)', desc: 'Crossfaded reverse loop. Flip Grain/Mirror while playing: the seam timing and softening must be identical, only the backward-rendering character differs.',
+		setup: {mat: 'perc', mode: 'reverse', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 0.9, xfade: 40, style: 'grain'}},
+	{name: 'XF: live crossfade modulation', desc: 'Forward loop, crossfade LFO enabled (depth 0.05, speed 0.5Hz). The overlap size sweeps live: the voice must stay trapped, no clicks, no escape, no retrigger.',
+		setup: {mat: 'perc', mode: 'forward', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 1.0, xfade: 30, lfoDepth: 0.05, lfoRate: 0.5, lfoTarget: 'xfade'}},
+	{name: 'XF: live marker movement', desc: 'Crossfaded forward loop with window modulation. The crossfade must track the moving markers, the voice stays trapped, and seams stay soft.',
+		setup: {mat: 'tonal', mode: 'forward', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 1.0, xfade: 40, lfoDepth: 0.15, lfoRate: 1.5, lfoTarget: 'both'}},
+	{name: 'XF: rate sweep through zero', desc: 'Crossfaded loop. Drag Rate slowly from +1 through 0 to -1. At 0 the fade-zone display holds its last orientation; crossing zero flips the seam to the other edge. No glitch at the crossing.',
+		setup: {mat: 'tonal', mode: 'forward', rate: 1, loopStart: 1.0, loopEnd: 2.5, start: 1.0, xfade: 35}},
+	{name: 'XF: ping-pong inactive check', desc: 'Ping-pong with the Crossfade control raised: the readout should show "inactive", the fade zones should NOT draw, and playback should be identical to zero crossfade (ping-pong reflects, it never wraps). Switch to Forward to hear the retained value engage.',
+		setup: {mat: 'perc', mode: 'pingpong', rate: 1, loopStart: 1.0, loopEnd: 2.0, start: 1.0, xfade: 50}},
 ];
 const testsDiv = $('tests');
 for (const t of TESTS) {
@@ -382,6 +452,8 @@ for (const t of TESTS) {
 		$('rate').value = s.rate; $('loopStart').value = s.loopStart; $('loopEnd').value = s.loopEnd;
 		$('startPos').value = s.start; $('loopOn').checked = s.loopOn !== false;
 		$('scrubOn').checked = !!s.scrub;
+		$('xfade').value = s.xfade || 0;
+		document.querySelector(`#lfoTarget input[value="${s.lfoTarget || 'both'}"]`).checked = true;
 		$('lfoDepth').value = s.lfoDepth || 0; $('lfoRate').value = s.lfoRate || 0.5;
 		syncOutputs();
 		await ensureEngine();
