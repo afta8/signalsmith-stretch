@@ -28,6 +28,8 @@ This adds a scheduled change, removing any scheduled changes occuring after this
 * `formantBaseHz` (number): rough fundamental used for formant analysis (e.g. 100 for low voice, 400 for high voice), or `0` to attempt pitch-tracking
 * `loopStart` (seconds) / `loopEnd` (seconds): sets a section of the input buffer to auto-loop.  Disabled if both are set to the same value.
 * `loopMode` (`'forward'` | `'reverse'` | `'pingpong'`, optional): loop topology.  When unset, the original (positive-rate forward) looping behaviour is used unchanged.
+* `playStart` / `playEnd` (seconds, optional): directional one-shot end boundaries for the natural-end notification (see `stretch.onended`).  They may sit inside the loaded sample and default to the loaded-material edges.  They only affect the notification - rendering is not stopped or silenced.
+* `reverseStyle` (`'grain'` | `'mirror'`, optional): rendering character for backward travel (negative-rate playback, scrubs, and the backward legs of `reverse`/`pingpong` loops).  `'grain'` (the default) is the original behaviour: each analysis grain keeps its forward shape while the sequence plays backward.  `'mirror'` is true tape-style reverse: the analysis window is time-reversed, so attacks become swells, the synthesis keeps forward quality, and ping-pong reflections are continuous palindromes.  Setting `reverseStyle` on a segment without `loopMode` opts it into the loop engine (`loopMode: 'forward'`), so one-shots and scrubs can use it.
 
 If the node is processing live input (not a buffer) then `input`/`rate`/`loopStart`/`loopEnd`/`loopMode` are ignored.
 
@@ -46,6 +48,18 @@ Behaviour rules shared by all modes:
 * Moving `loopStart`/`loopEnd` while playback is inside the loop keeps it trapped and phase-maps it into the new window; moving markers before entry doesn't override start reachability.
 * Setting invalid or zero-width bounds (`loopEnd <= loopStart`) safely disables looping and releases the voice to ordinary one-shot traversal.
 * High rates that cross one or more loop lengths within a render quantum are handled exactly (analytic wrap/reflect), independent of render-quantum size and free of cumulative drift.
+
+### `stretch.onended`
+
+Natural-end callback for loop-engine segments (any segment with `loopMode` set), assigned like `AudioBufferSourceNode.onended`:
+
+```js
+stretch.onended = ({position, direction, output}) => { /* release the voice */ };
+```
+
+It fires **once per run-out**, from the audio thread's own state, when the voice (a) is not trapped in the loop, (b) cannot currently become trapped (looping disabled, or the loop is unreachable in the travel direction), and (c) has crossed its directional end boundary - `playEnd` when travelling forward, `playStart` when travelling backward (defaults: the edges of the loaded audio).  `output` is the context time at which the crossing becomes audible.
+
+Rendering is *not* stopped - the consumer decides how to end the voice (schedule `{active: false}`, release an envelope, or reuse the node).  The notification re-arms automatically whenever the condition clears: a scrub back into the material, a rate-polarity change back toward it, marker moves that restore reachability, or newly appended buffers extending past the position.  A voice held at `rate: 0` never fires.
 
 ### `stretch.start(?when)` / `stretch.stop(?when)`
 

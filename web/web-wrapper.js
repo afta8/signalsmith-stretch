@@ -2,6 +2,13 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 	// NOTE: this entire function is stringified into the AudioWorklet module
 	// (see the Blob construction below), so all helpers must live inside it.
 	const LOOP_MODES = {forward: true, reverse: true, pingpong: true};
+	// Backward-travel rendering styles:
+	// 'grain' (default) = original behaviour: forward-ordered analysis window,
+	//   signed seek rate - each grain keeps its forward shape, sequence reversed
+	// 'mirror' = time-reversed analysis window around the mirrored position:
+	//   true tape-style reverse (attacks become swells), engine always sees a
+	//   forward-moving signal
+	const REVERSE_STYLES = {grain: true, mirror: true};
 	// Positive modulo (result in [0, m) for m > 0, both signs of x)
 	const posMod = (x, m) => ((x%m) + m)%m;
 
@@ -34,12 +41,16 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				loopStart: 0,
 				loopEnd: 0,
 				loopMode: null, /* null = original behaviour, or 'forward'/'reverse'/'pingpong' */
+				reverseStyle: null, /* null = 'grain' (original); or 'grain-clean'/'mirror' */
+				playStart: null, /* one-shot end boundary when travelling backward (null = start of loaded audio) */
+				playEnd: null, /* one-shot end boundary when travelling forward (null = end of loaded audio) */
 				hasExplicitInput: false
 			}];
 
 			// Loop-topology voice state (only used when a segment sets loopMode).
 			// All boundary decisions happen here, inside the audio thread.
 			this.voice = {
+				endedNotified: false, // 'ended' has been posted for the current run-out
 				segment: null, // the time-map segment this state was last synced to
 				pos: 0, // current input position (seconds)
 				anchorOutput: 0, // output time the position was last integrated to
@@ -101,6 +112,12 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					Object.assign(obj, objIn);
 					obj.hasExplicitInput = (objIn.input != null);
 					if (obj.loopMode != null && !LOOP_MODES[obj.loopMode]) obj.loopMode = null;
+					if (obj.reverseStyle != null && !REVERSE_STYLES[obj.reverseStyle]) obj.reverseStyle = null;
+					// reverseStyle needs the loop engine's direction model, even for
+					// one-shots (zero-width bounds): opt the segment in
+					if (obj.reverseStyle != null && obj.loopMode == null) obj.loopMode = 'forward';
+					if (obj.playStart != null && !isFinite(obj.playStart)) obj.playStart = null;
+					if (obj.playEnd != null && !isFinite(obj.playEnd)) obj.playEnd = null;
 					if (obj.input === null) {
 						let rate = (latestSegment.active ? latestSegment.rate : 0);
 						if (latestSegment.loopMode != null && latestSegment === this.voice.segment) {
@@ -247,13 +264,36 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				this.buffersIn.push(bufferPointer + lengthBytes*c);
 				this.buffersOut.push(bufferPointer + lengthBytes*(c + this.channels));
 			}
+			// preallocated scratch for mirrored (time-reversed) window fills
+			this.mirrorScratch = [];
+			for (let c = 0; c < this.channels; ++c) {
+				this.mirrorScratch.push(new Float32Array(this.bufferLength));
+			}
 		}
 
 		// Fill the WASM input window (the seek pre-roll) with sample-buffer
 		// audio ending at `inputSamplesEnd`, zero-padded outside the stored audio
 		fillInputWindow(memory, outputList, inputSamplesEnd) {
 			let buffers = outputList[0].map((_, c) => new Float32Array(memory, this.buffersIn[c], this.bufferLength));
+			this.fillForward(buffers, inputSamplesEnd);
+		}
 
+		// Mirrored fill: the window contains the source time-reversed, newest
+		// sample = `newestSample`, so the engine sees a forward-moving signal
+		// while the voice travels backward
+		fillInputWindowMirrored(memory, outputList, newestSample) {
+			this.fillForward(this.mirrorScratch, newestSample + this.bufferLength);
+			let n = this.bufferLength;
+			outputList[0].forEach((_, c) => {
+				let view = new Float32Array(memory, this.buffersIn[c], n);
+				let src = this.mirrorScratch[c%this.mirrorScratch.length];
+				for (let j = 0; j < n; j++) view[j] = src[n - 1 - j];
+			});
+		}
+
+		// Copy sample-buffer audio ending at `inputSamplesEnd` (exclusive) into
+		// the target arrays, zero-padded outside the stored audio
+		fillForward(buffers, inputSamplesEnd) {
 			let blockSamples = 0; // current write position in the temporary input buffer
 			let audioBufferIndex = 0;
 			let audioSamples = this.audioBuffersStart; // start of current audio buffer
@@ -438,6 +478,41 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			return v.turned ? -rateSign : rateSign; // reverse
 		}
 
+		// Natural-end notification: posts ['ended', {position, direction, output}]
+		// once when the voice has run out past its directional end boundary and
+		// cannot (currently) be trapped by the loop. The play region (playStart/
+		// playEnd) may sit inside the loaded sample; it bounds one-shot travel
+		// only - trapped voices loop regardless. Re-arms automatically whenever
+		// the condition clears (scrub back in, polarity flip toward material,
+		// marker moves that restore reachability, newly streamed buffers).
+		// Rendering is not stopped: the consumer decides how to end the voice.
+		checkEnded(seg, dir, outputTime) {
+			let v = this.voice;
+			if (!dir) return; // rate 0 holds - a held voice never runs out
+			let L = this.loopLength(seg);
+			let canTrap = false;
+			if (L) {
+				canTrap = v.trapped || (dir > 0 ? v.pos < seg.loopEnd : v.pos > seg.loopStart);
+			}
+			let ended = false;
+			if (!canTrap) {
+				if (dir > 0) {
+					let end = (seg.playEnd != null) ? seg.playEnd : this.audioBuffersEnd/sampleRate;
+					ended = v.pos >= end;
+				} else {
+					let start = (seg.playStart != null) ? seg.playStart : this.audioBuffersStart/sampleRate;
+					ended = v.pos <= start;
+				}
+			}
+			if (ended && !v.endedNotified) {
+				v.endedNotified = true;
+				// `output` is the context time at which the crossing is audible
+				this.port.postMessage(['ended', {position: v.pos, direction: dir, output: outputTime}]);
+			} else if (!ended) {
+				v.endedNotified = false;
+			}
+		}
+
 		// Where playback will be `lookahead` input-seconds further along its
 		// travel, mapped through the loop topology. Pure - no state changes.
 		peekVoice(seg, lookahead) {
@@ -543,12 +618,21 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					let v = this.voice;
 					this.advanceVoice(seg, outputTime);
 					let dir = this.voiceDirection(seg);
+					this.checkEnded(seg, dir, outputTime);
 					if (dir) v.lastDir = dir;
 					else dir = v.lastDir; // rate zero: hold the last orientation
 
-					this.fillInputWindow(memory, outputList, Math.round((v.pos + this.inputLatencySeconds)*sampleRate));
-					// seek direction follows the actual travel (rate sign x loop leg)
-					wasmModule._seek(this.bufferLength, dir*Math.abs(seg.rate));
+					let style = seg.reverseStyle || 'grain';
+					if (style === 'mirror' && dir < 0) {
+						// time-reversed window with the lookahead facing the travel
+						// direction; engine runs forward at |rate|
+						this.fillInputWindowMirrored(memory, outputList, Math.round((v.pos - this.inputLatencySeconds)*sampleRate));
+						wasmModule._seek(this.bufferLength, Math.abs(seg.rate));
+					} else {
+						this.fillInputWindow(memory, outputList, Math.round((v.pos + this.inputLatencySeconds)*sampleRate));
+						// 'grain': seek direction follows the actual travel (rate sign x loop leg)
+						wasmModule._seek(this.bufferLength, dir*Math.abs(seg.rate));
+					}
 					// reported time matches the audible loop position and direction
 					reportTime = this.peekVoice(seg, this.inputLatencySeconds);
 				}
@@ -630,12 +714,16 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 			});
 		};
 		audioNode.inputTime = 0;
+		audioNode.onended = null; // natural-end callback: ({position, direction, output}) => {}
 		audioNode.port.onmessage = (event) => {
 			let data = event.data;
 			let id = data[0], value = data[1];
 			if (id == 'time') {
 				audioNode.inputTime = value;
 				if (timeUpdateCallback) timeUpdateCallback(value);
+			}
+			if (id == 'ended' && audioNode.onended) {
+				audioNode.onended(value);
 			}
 			if (id in requestMap) {
 				requestMap[id](value);
