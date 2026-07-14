@@ -44,12 +44,15 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				loopEnd: 0,
 				loopMode: null, /* null = original behaviour, or 'forward'/'reverse'/'pingpong' */
 				reverseStyle: null, /* null = 'grain' (original); or 'grain-clean'/'mirror' */
+				playStart: null, /* one-shot end boundary when travelling backward (null = start of loaded audio) */
+				playEnd: null, /* one-shot end boundary when travelling forward (null = end of loaded audio) */
 				hasExplicitInput: false
 			}];
 
 			// Loop-topology voice state (only used when a segment sets loopMode).
 			// All boundary decisions happen here, inside the audio thread.
 			this.voice = {
+				endedNotified: false, // 'ended' has been posted for the current run-out
 				segment: null, // the time-map segment this state was last synced to
 				pos: 0, // current input position (seconds)
 				anchorOutput: 0, // output time the position was last integrated to
@@ -115,6 +118,8 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					// reverseStyle needs the loop engine's direction model, even for
 					// one-shots (zero-width bounds): opt the segment in
 					if (obj.reverseStyle != null && obj.loopMode == null) obj.loopMode = 'forward';
+					if (obj.playStart != null && !isFinite(obj.playStart)) obj.playStart = null;
+					if (obj.playEnd != null && !isFinite(obj.playEnd)) obj.playEnd = null;
 					if (obj.input === null) {
 						let rate = (latestSegment.active ? latestSegment.rate : 0);
 						if (latestSegment.loopMode != null && latestSegment === this.voice.segment) {
@@ -475,6 +480,41 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			return v.turned ? -rateSign : rateSign; // reverse
 		}
 
+		// Natural-end notification: posts ['ended', {position, direction, output}]
+		// once when the voice has run out past its directional end boundary and
+		// cannot (currently) be trapped by the loop. The play region (playStart/
+		// playEnd) may sit inside the loaded sample; it bounds one-shot travel
+		// only - trapped voices loop regardless. Re-arms automatically whenever
+		// the condition clears (scrub back in, polarity flip toward material,
+		// marker moves that restore reachability, newly streamed buffers).
+		// Rendering is not stopped: the consumer decides how to end the voice.
+		checkEnded(seg, dir, outputTime) {
+			let v = this.voice;
+			if (!dir) return; // rate 0 holds - a held voice never runs out
+			let L = this.loopLength(seg);
+			let canTrap = false;
+			if (L) {
+				canTrap = v.trapped || (dir > 0 ? v.pos < seg.loopEnd : v.pos > seg.loopStart);
+			}
+			let ended = false;
+			if (!canTrap) {
+				if (dir > 0) {
+					let end = (seg.playEnd != null) ? seg.playEnd : this.audioBuffersEnd/sampleRate;
+					ended = v.pos >= end;
+				} else {
+					let start = (seg.playStart != null) ? seg.playStart : this.audioBuffersStart/sampleRate;
+					ended = v.pos <= start;
+				}
+			}
+			if (ended && !v.endedNotified) {
+				v.endedNotified = true;
+				// `output` is the context time at which the crossing is audible
+				this.port.postMessage(['ended', {position: v.pos, direction: dir, output: outputTime}]);
+			} else if (!ended) {
+				v.endedNotified = false;
+			}
+		}
+
 		// Where playback will be `lookahead` input-seconds further along its
 		// travel, mapped through the loop topology. Pure - no state changes.
 		peekVoice(seg, lookahead) {
@@ -580,6 +620,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					let v = this.voice;
 					this.advanceVoice(seg, outputTime);
 					let dir = this.voiceDirection(seg);
+					this.checkEnded(seg, dir, outputTime);
 					if (dir) v.lastDir = dir;
 					else dir = v.lastDir; // rate zero: hold the last orientation
 
@@ -677,12 +718,16 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 			});
 		};
 		audioNode.inputTime = 0;
+		audioNode.onended = null; // natural-end callback: ({position, direction, output}) => {}
 		audioNode.port.onmessage = (event) => {
 			let data = event.data;
 			let id = data[0], value = data[1];
 			if (id == 'time') {
 				audioNode.inputTime = value;
 				if (timeUpdateCallback) timeUpdateCallback(value);
+			}
+			if (id == 'ended' && audioNode.onended) {
+				audioNode.onended(value);
 			}
 			if (id in requestMap) {
 				requestMap[id](value);
