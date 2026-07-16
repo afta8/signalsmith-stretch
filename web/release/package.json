@@ -1,6 +1,6 @@
 {
 	"name": "@afta8/signalsmith-stretch",
-	"version": "1.3.2-aura.4",
+	"version": "1.3.2-aura.5",
 	"description": "JS/WASM release of the Signalsmith Stretch library, extended with native loop topologies (forward/reverse/ping-pong loopMode), tape-style mirror reverse, natural-end notifications, and duration-preserving equal-power loop crossfade",
 	"main": "SignalsmithStretch.mjs",
 	"exports": {
