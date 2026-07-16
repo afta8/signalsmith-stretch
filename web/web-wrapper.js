@@ -26,6 +26,16 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			this.audioBuffersEnd = 0; // just to be helpful
 			this._readSeg = 0; // sourceSample() cursor cache
 			this._readSegStart = 0;
+
+			// Render-path allocation caches. process() runs on the audio
+			// thread, where per-block allocation causes GC glitches, so WASM
+			// heap views and the periodic time message are created once and
+			// reused; ensureViews() rebuilds only on the rare non-render
+			// events (heap growth, buffer reconfiguration).
+			this._viewsMemory = null; // ArrayBuffer the cached views were built on
+			this._viewsIn = [];
+			this._viewsOut = [];
+			this._timeMsg = ['time', 0];
 			
 			this.timeIntervalSamples = sampleRate*0.1;
 			this.timeIntervalCounter = 0;
@@ -281,26 +291,45 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			for (let c = 0; c < this.channels; ++c) {
 				this.mirrorScratch.push(new Float32Array(this.bufferLength));
 			}
+			// buffer pointers moved: cached heap views must be rebuilt
+			this._viewsMemory = null;
+		}
+
+		// Cached per-channel Float32Array views over the WASM heap, spanning
+		// the full input/output windows. Rebuilt only when the heap's
+		// ArrayBuffer identity changes (WASM memory growth) or after
+		// updateBuffers() moves the pointers — never per block, so the
+		// steady-state render path performs no allocation.
+		ensureViews(memory) {
+			if (this._viewsMemory === memory) return;
+			this._viewsMemory = memory;
+			this._viewsIn.length = 0;
+			this._viewsOut.length = 0;
+			for (let c = 0; c < this.channels; ++c) {
+				this._viewsIn.push(new Float32Array(memory, this.buffersIn[c], this.bufferLength));
+				this._viewsOut.push(new Float32Array(memory, this.buffersOut[c], this.bufferLength));
+			}
 		}
 
 		// Fill the WASM input window (the seek pre-roll) with sample-buffer
 		// audio ending at `inputSamplesEnd`, zero-padded outside the stored audio
-		fillInputWindow(memory, outputList, inputSamplesEnd) {
-			let buffers = outputList[0].map((_, c) => new Float32Array(memory, this.buffersIn[c], this.bufferLength));
-			this.fillForward(buffers, inputSamplesEnd);
+		fillInputWindow(memory, inputSamplesEnd) {
+			this.ensureViews(memory);
+			this.fillForward(this._viewsIn, inputSamplesEnd);
 		}
 
 		// Mirrored fill: the window contains the source time-reversed, newest
 		// sample = `newestSample`, so the engine sees a forward-moving signal
 		// while the voice travels backward
-		fillInputWindowMirrored(memory, outputList, newestSample) {
+		fillInputWindowMirrored(memory, newestSample) {
 			this.fillForward(this.mirrorScratch, newestSample + this.bufferLength);
+			this.ensureViews(memory);
 			let n = this.bufferLength;
-			outputList[0].forEach((_, c) => {
-				let view = new Float32Array(memory, this.buffersIn[c], n);
+			for (let c = 0; c < this.channels; ++c) {
+				let view = this._viewsIn[c];
 				let src = this.mirrorScratch[c%this.mirrorScratch.length];
 				for (let j = 0; j < n; j++) view[j] = src[n - 1 - j];
-			});
+			}
 		}
 
 		// Random-access source read (absolute sample index), zero outside the
@@ -327,7 +356,8 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 		// the approach crosses into the far-side material, then the recovery side
 		// returns to the authoritative phase. This keeps every read in-loop and
 		// never reflects/reverses source material. One voice, one process() call.
-		fillInputWindowSeamTaper(memory, outputList, seg, dir, style, Lsec, Fsec) {
+		fillInputWindowSeamTaper(memory, seg, dir, style, Lsec, Fsec) {
+			this.ensureViews(memory);
 			let n = this.bufferLength;
 			let S = seg.loopStart*sampleRate;
 			let L = Lsec*sampleRate;
@@ -342,7 +372,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			let halfPi = Math.PI*0.5;
 			let loStart = Math.round(S);
 			for (let c = 0; c < this.channels; ++c) {
-				let view = new Float32Array(memory, this.buffersIn[c], n);
+				let view = this._viewsIn[c];
 				this._readSeg = 0;
 				this._readSegStart = this.audioBuffersStart;
 				for (let j = 0; j < n; ++j) {
@@ -394,6 +424,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 		// Copy sample-buffer audio ending at `inputSamplesEnd` (exclusive) into
 		// the target arrays, zero-padded outside the stored audio
 		fillForward(buffers, inputSamplesEnd) {
+			let numBuffers = buffers.length;
 			let blockSamples = 0; // current write position in the temporary input buffer
 			let audioBufferIndex = 0;
 			let audioSamples = this.audioBuffersStart; // start of current audio buffer
@@ -401,7 +432,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			let inputSamples = inputSamplesEnd - this.bufferLength;
 			if (inputSamples < audioSamples) {
 				blockSamples = audioSamples - inputSamples;
-				buffers.forEach(b => b.fill(0, 0, blockSamples));
+				for (let c = 0; c < numBuffers; ++c) buffers[c].fill(0, 0, blockSamples);
 				inputSamples = audioSamples;
 			}
 			while (audioBufferIndex < this.audioBuffers.length && audioSamples < inputSamplesEnd) {
@@ -411,10 +442,15 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				// how many samples to copy: min(how many left in the buffer, how many more we need)
 				let count = Math.min(audioBuffer[0].length - startIndex, inputSamplesEnd - inputSamples);
 				if (count > 0) {
-					buffers.forEach((buffer, c) => {
+					// indexed copy: subarray() would allocate a view per
+					// channel per block on the audio thread
+					for (let c = 0; c < numBuffers; ++c) {
+						let buffer = buffers[c];
 						let channelBuffer = audioBuffer[c%audioBuffer.length];
-						buffer.subarray(blockSamples).set(channelBuffer.subarray(startIndex, startIndex + count));
-					});
+						for (let j = 0; j < count; ++j) {
+							buffer[blockSamples + j] = channelBuffer[startIndex + j];
+						}
+					}
 					audioSamples += count;
 					blockSamples += count;
 				} else { // we're already past this buffer - skip it
@@ -423,7 +459,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				++audioBufferIndex;
 			}
 			if (blockSamples < this.bufferLength) {
-				buffers.forEach(buffer => buffer.subarray(blockSamples).fill(0));
+				for (let c = 0; c < numBuffers; ++c) buffers[c].fill(0, blockSamples);
 			}
 		}
 
@@ -704,32 +740,31 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			// Check the input/output channel counts
 			if (outputList[0].length != this.channels) {
 				this.channels = outputList[0]?.length || 0;
-				configure();
+				this.configure();
 			}
 			let outputBlockSize = outputList[0][0].length;
 
 			let memory = wasmModule.exports ? wasmModule.exports.memory.buffer : wasmModule.HEAP8.buffer;
+			this.ensureViews(memory);
 			// Buffer list (one per channel)
 			let inputs = inputList[0];
 			if (!currentMapSegment.active) {
-				outputList[0].forEach((_, c) => {
-					let channelBuffer = inputs[c%inputs.length];
-					let buffer = new Float32Array(memory, this.buffersIn[c], outputBlockSize);
-					buffer.fill(0);
-				});
+				for (let c = 0; c < this.channels; ++c) {
+					this._viewsIn[c].fill(0, 0, outputBlockSize);
+				}
 				// Should detect silent input and skip processing
 				wasmModule._process(outputBlockSize, outputBlockSize);
 			} else if (inputs?.length) {
 				// Live input
-				outputList[0].forEach((_, c) => {
+				for (let c = 0; c < this.channels; ++c) {
 					let channelBuffer = inputs[c%inputs.length];
-					let buffer = new Float32Array(memory, this.buffersIn[c], outputBlockSize);
+					let view = this._viewsIn[c];
 					if (channelBuffer) {
-						buffer.set(channelBuffer);
+						view.set(channelBuffer);
 					} else {
-						buffer.fill(0);
+						view.fill(0, 0, outputBlockSize);
 					}
-				})
+				}
 				wasmModule._process(outputBlockSize, outputBlockSize);
 			} else {
 				let seg = currentMapSegment;
@@ -752,7 +787,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					this.voice.trapped = false;
 					this.voice.segment = seg;
 
-					this.fillInputWindow(memory, outputList, Math.round(inputTime*sampleRate));
+					this.fillInputWindow(memory, Math.round(inputTime*sampleRate));
 					// constantly seeking, so we don't have to worry about the input buffers needing to be a rate-dependent size
 					wasmModule._seek(this.bufferLength, seg.rate);
 					reportTime = inputTime;
@@ -774,15 +809,15 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					let tapered = Fsec > 0 && v.trapped
 						&& (seg.loopMode === 'forward' || (seg.loopMode === 'reverse' && v.turned));
 					if (tapered) {
-						this.fillInputWindowSeamTaper(memory, outputList, seg, dir, style, Lsec, Fsec);
+						this.fillInputWindowSeamTaper(memory, seg, dir, style, Lsec, Fsec);
 						wasmModule._seek(this.bufferLength, (style === 'mirror' && dir < 0) ? Math.abs(seg.rate) : dir*Math.abs(seg.rate));
 					} else if (style === 'mirror' && dir < 0) {
 						// time-reversed window with the lookahead facing the travel
 						// direction; engine runs forward at |rate|
-						this.fillInputWindowMirrored(memory, outputList, Math.round((v.pos - this.inputLatencySeconds)*sampleRate));
+						this.fillInputWindowMirrored(memory, Math.round((v.pos - this.inputLatencySeconds)*sampleRate));
 						wasmModule._seek(this.bufferLength, Math.abs(seg.rate));
 					} else {
-						this.fillInputWindow(memory, outputList, Math.round((v.pos + this.inputLatencySeconds)*sampleRate));
+						this.fillInputWindow(memory, Math.round((v.pos + this.inputLatencySeconds)*sampleRate));
 						// 'grain': seek direction follows the actual travel (rate sign x loop leg)
 						wasmModule._seek(this.bufferLength, dir*Math.abs(seg.rate));
 					}
@@ -794,17 +829,24 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 				this.timeIntervalCounter -= outputBlockSize;
 				if (this.timeIntervalCounter <= 0) {
 					this.timeIntervalCounter = this.timeIntervalSamples;
-					this.port.postMessage(['time', reportTime]);
+					// postMessage clones synchronously, so the preallocated
+					// message array is safe to reuse every interval
+					this._timeMsg[1] = reportTime;
+					this.port.postMessage(this._timeMsg);
 				}
 			}
-			
+
 			// Re-fetch in case the memory changed (even though there *shouldn't* be any allocations)
 			memory = wasmModule.exports ? wasmModule.exports.memory.buffer : wasmModule.HEAP8.buffer;
-			outputList[0].forEach((channelBuffer, c) => {
-				let buffer = new Float32Array(memory, this.buffersOut[c], outputBlockSize);
-				channelBuffer.set(buffer);
-			});
-			
+			this.ensureViews(memory);
+			for (let c = 0; c < this.channels; ++c) {
+				let channelBuffer = outputList[0][c];
+				let view = this._viewsOut[c];
+				for (let j = 0; j < outputBlockSize; ++j) {
+					channelBuffer[j] = view[j];
+				}
+			}
+
 			return true;
 		}
 	}
