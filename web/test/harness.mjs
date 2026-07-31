@@ -11,6 +11,16 @@ export const RELEASE_BUNDLE = path.join(dirname, '../release/SignalsmithStretch.
 
 export const QUANTUM = 128;
 
+function validateTransferList(transfer) {
+	if (!transfer) return;
+	if (new Set(transfer).size !== transfer.length) {
+		throw new Error('DataCloneError: duplicate ArrayBuffer in transfer list');
+	}
+	if (transfer.some(buffer => buffer instanceof SharedArrayBuffer)) {
+		throw new Error('DataCloneError: SharedArrayBuffer in transfer list');
+	}
+}
+
 export async function createProcessor({
 	bundlePath = RELEASE_BUNDLE,
 	sampleRate = 48000,
@@ -24,17 +34,15 @@ export async function createProcessor({
 		currentFrame: 0,
 		AudioWorkletProcessor: class AudioWorkletProcessor {
 			constructor() {
-				// enforce the real MessagePort rule: a transfer list must not
-				// contain duplicate ArrayBuffers (browsers throw DataCloneError)
+				// Enforce the relevant MessagePort transfer-list rules.
 				this.port = {onmessage: null, postMessage: (data, transfer) => {
-					if (transfer && new Set(transfer).size !== transfer.length) {
-						throw new Error('DataCloneError: duplicate ArrayBuffer in transfer list');
-					}
+					validateTransferList(transfer);
 				}};
 			}
 		},
 		registerProcessor: (name, cls) => { registered = {name, cls}; },
 		console, TextDecoder, TextEncoder, Uint8Array, Float32Array, Int32Array,
+		ArrayBuffer, SharedArrayBuffer,
 		WebAssembly, Promise, Math, Date, performance, setTimeout, clearTimeout,
 		URL, Blob: globalThis.Blob,
 		crypto: globalThis.crypto,
@@ -51,18 +59,20 @@ export async function createProcessor({
 	const proc = new registered.cls({numberOfOutputs: 1, outputChannelCount: [channels]});
 
 	const posted = []; // every message the processor posts
+	const postedTransfers = []; // transfer list aligned with each posted message
 	const timePosts = []; // {frame, value} for 'time' messages
 	let renderedFrames = 0;
 	proc.port.postMessage = (data, transfer) => {
-		if (transfer && new Set(transfer).size !== transfer.length) {
-			throw new Error('DataCloneError: duplicate ArrayBuffer in transfer list');
-		}
+		validateTransferList(transfer);
 		posted.push(data);
+		postedTransfers.push(transfer ? [...transfer] : []);
 		if (data[0] === 'time') timePosts.push({frame: renderedFrames, seconds: renderedFrames/sampleRate, value: data[1]});
 	};
 	let msgId = 0;
 	const call = (method, ...args) => {
-		proc.port.onmessage({data: [msgId++, method, ...args]});
+		const id = msgId++;
+		proc.port.onmessage({data: [id, method, ...args]});
+		return id;
 	};
 
 	await new Promise((resolve, reject) => {
@@ -75,7 +85,7 @@ export async function createProcessor({
 	});
 
 	return {
-		proc, call, posted, timePosts, sandbox, sampleRate, channels,
+		proc, call, posted, postedTransfers, timePosts, sandbox, sampleRate, channels,
 		get renderedFrames() { return renderedFrames; },
 		get renderedSeconds() { return renderedFrames/sampleRate; },
 		// Render n quanta; returns Float32Array per channel of everything rendered by this call
