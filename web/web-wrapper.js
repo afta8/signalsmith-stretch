@@ -11,6 +11,14 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 	const REVERSE_STYLES = {grain: true, mirror: true};
 	// Positive modulo (result in [0, m) for m > 0, both signs of x)
 	const posMod = (x, m) => ((x%m) + m)%m;
+	// Only ordinary ArrayBuffers are transferable.  SharedArrayBuffers stay
+	// shared and must never appear in a postMessage transfer list.
+	const addTransferableBackingStores = (transfer, sampleBuffers) => {
+		sampleBuffers.forEach(buffer => {
+			let backingStore = buffer.buffer;
+			if (backingStore instanceof ArrayBuffer) transfer.add(backingStore);
+		});
+	};
 
 	class WasmProcessor extends AudioWorkletProcessor {
 		constructor(options) {
@@ -180,15 +188,17 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					return obj;
 				},
 				dropBuffers: toSeconds => {
-					// Transfer lists must not contain duplicates: channels may share
-					// one ArrayBuffer (e.g. the same array added for every channel)
+					// Transfer lists must contain only unique ordinary ArrayBuffers:
+					// channels may share one backing store, and SharedArrayBuffers are
+					// shared by structured clone rather than transferred.
 					if (typeof toSeconds !== 'number') {
-						let buffers = [...new Set(this.audioBuffers.flat(1).map(b => b.buffer))];
+						let transfer = new Set();
+						this.audioBuffers.forEach(buffers => addTransferableBackingStores(transfer, buffers));
 						this.audioBuffers = [];
 						this.audioBuffersStart = this.audioBuffersEnd = 0;
 						return {
 							value: {start: 0, end: 0},
-							transfer: buffers
+							transfer: [...transfer]
 						};
 					}
 					let transfer = new Set();
@@ -199,7 +209,8 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 						let endSeconds = endSamples/sampleRate;
 						if (endSeconds > toSeconds) break;
 
-						this.audioBuffers.shift().forEach(b => transfer.add(b.buffer));
+						let dropped = this.audioBuffers.shift();
+						addTransferableBackingStores(transfer, dropped);
 						this.audioBuffersStart += length;
 					}
 					transfer = [...transfer];

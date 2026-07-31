@@ -47,6 +47,24 @@ async function renderSchedule({bundlePath, sampleRate = SR, channels = 2, buffer
 	return {h, out: h.render(quanta)};
 }
 
+function sharedSineBuffer({sampleRate = SR, seconds = 0.5, freq = 220, gain = 0.5} = {}) {
+	const length = Math.round(sampleRate*seconds);
+	const backing = new SharedArrayBuffer(2*length*Float32Array.BYTES_PER_ELEMENT);
+	const left = new Float32Array(backing, 0, length);
+	const right = new Float32Array(backing, length*Float32Array.BYTES_PER_ELEMENT, length);
+	for (let i = 0; i < length; ++i) {
+		left[i] = Math.sin(2*Math.PI*freq*i/sampleRate)*gain;
+		right[i] = Math.sin(2*Math.PI*(freq*1.5)*i/sampleRate)*gain;
+	}
+	return {backing, channels: [left, right]};
+}
+
+function responseFor(harness, messageId) {
+	const index = harness.posted.findIndex(message => message[0] === messageId);
+	assert.notEqual(index, -1, `response ${messageId} was posted`);
+	return {value: harness.posted[index][1], transfer: harness.postedTransfers[index]};
+}
+
 const LEGACY_SCHEDULES = [
 	// classic positive-rate forward loop, no loopMode anywhere
 	[{active: true, input: 0.1, rate: 1, loopStart: 0.5, loopEnd: 1.0, output: 0}],
@@ -200,6 +218,52 @@ test('dropBuffers survives channels sharing one ArrayBuffer (duplicate transfer 
 	h.call('schedule', {active: true, input: 0, rate: 1, loopStart: 0.2, loopEnd: 0.6, loopMode: 'forward', output: 0});
 	const out = h.render(300)[0];
 	assert.ok(!hasNaN(out) && rms(out.subarray(out.length >> 1)) > 0.05, 'renders after shared-buffer drops');
+});
+
+test('dropBuffers omits shared backing stores and reloads finite audible content', async () => {
+	const h = await createProcessor({sampleRate: SR});
+	const first = sharedSineBuffer();
+	assert.equal(first.channels[0].buffer, first.backing, 'left channel uses the shared backing store');
+	assert.equal(first.channels[1].buffer, first.backing, 'right channel uses the shared backing store');
+
+	h.call('addBuffers', first.channels);
+	const fullDrop = responseFor(h, h.call('dropBuffers'));
+	assert.equal(fullDrop.value.start, 0);
+	assert.equal(fullDrop.value.end, 0);
+	assert.deepEqual(fullDrop.transfer, [], 'full drop does not transfer the SharedArrayBuffer');
+
+	const replacement = sharedSineBuffer({freq: 330});
+	h.call('addBuffers', replacement.channels);
+	h.call('schedule', {active: true, input: 0, rate: 1, output: 0});
+	const output = h.render(300)[0];
+	const settled = output.subarray(output.length >> 1);
+	assert.ok(!hasNaN(settled), 'shared reload renders only finite samples');
+	assert.ok(rms(settled) > 0.05, 'shared reload remains audible');
+});
+
+test('partial drop omits segmented shared backing stores', async () => {
+	const h = await createProcessor({sampleRate: SR});
+	const first = sharedSineBuffer({seconds: 0.25});
+	const second = sharedSineBuffer({seconds: 0.25, freq: 440});
+	h.call('addBuffers', first.channels);
+	h.call('addBuffers', second.channels);
+
+	const partialDrop = responseFor(h, h.call('dropBuffers', 0.25));
+	assert.equal(partialDrop.value.start, 0.25);
+	assert.equal(partialDrop.value.end, 0.5);
+	assert.deepEqual(partialDrop.transfer, [], 'partial drop does not transfer the SharedArrayBuffer');
+});
+
+test('dropBuffers transfers only unique ordinary backing stores from mixed input', async () => {
+	const h = await createProcessor({sampleRate: SR});
+	const ordinary = sineBuffer({sampleRate: SR, seconds: 0.25, channels: 1})[0];
+	const shared = sharedSineBuffer({seconds: 0.25});
+	h.call('addBuffers', [ordinary, ordinary]);
+	h.call('addBuffers', shared.channels);
+
+	const fullDrop = responseFor(h, h.call('dropBuffers'));
+	assert.equal(fullDrop.transfer.length, 1, 'ordinary shared-channel backing store is deduplicated');
+	assert.equal(fullDrop.transfer[0], ordinary.buffer, 'only the ordinary ArrayBuffer is transferred');
 });
 
 test('pitch shift and loop modes combine (semitones stay applied across seams)', async () => {

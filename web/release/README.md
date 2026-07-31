@@ -117,17 +117,17 @@ Starts/stops playback or processing, immediately or at some future time.  These 
 
 ### `stretch.addBuffers([...])`
 
-This adds buffers to the end of the current input sample buffers.  Buffers should be typed arrays of equal length, one per channel.
+This adds buffers to the end of the current input sample buffers.  Buffers should be typed arrays of equal length, one per channel.  Channels may use ordinary `ArrayBuffer` storage or immutable `SharedArrayBuffer` storage; SAB-backed views are retained for read-only source lookup and are not mutated by Stretch.  Do not include a `SharedArrayBuffer` in a transfer list when delivering shared channels.
 
 It can be called multiple times, and the new buffers are inserted immediately after the existing ones, which lets you start playback before the entire audio is loaded.  It returns a Promise for the new sample buffer end time, in seconds.
 
 ### `stretch.dropBuffers()`
 
-This drops all input buffers, and resets the input buffer end time to 0.
+This drops all input buffers, and resets the input buffer end time to 0.  Ordinary `ArrayBuffer` backing stores are returned through the message transfer list; shared backing stores are released without being transferred.
 
 ### `stretch.dropBuffers(toSeconds)`
 
-This drops all input buffers before the given time, but doesn't change the end time.  It returns a Promise for an object with the current input buffer extent: `{start: ..., end: ...}`.
+This drops all input buffers before the given time, but doesn't change the end time.  It returns a Promise for an object with the current input buffer extent: `{start: ..., end: ...}`.  As with a full drop, ordinary backing stores are transferred and shared backing stores are only released.
 
 This can be useful when processing streams or very long audio files, letting the Stretch node release old buffers once that section of the input will no longer be played back.
 
